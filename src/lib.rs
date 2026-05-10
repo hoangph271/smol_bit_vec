@@ -18,14 +18,28 @@ impl SmolBitVec {
         Self::default()
     }
 
-    pub fn push(&mut self, _value: bool) {
-        todo!()
+    pub fn push(&mut self, value: bool) {
+        if value {
+            match self.bits {
+                SmolBitVecVariant::Inline(bits) => {
+                    let mask = 1usize << self.len();
+
+                    self.bits = SmolBitVecVariant::Inline(bits | mask);
+                }
+            }
+        }
+
+        self.len += 1;
     }
 
     pub fn get(&self, index: usize) -> Option<bool> {
+        if self.is_empty() {
+            return None;
+        }
+
         match self.bits {
             SmolBitVecVariant::Inline(bits) => {
-                if index - 1 > usize::BITS as usize {
+                if index >= self.len() {
                     return None;
                 }
 
@@ -36,8 +50,29 @@ impl SmolBitVec {
         }
     }
 
-    pub fn set(&mut self, _index: usize, _value: bool) -> Option<bool> {
-        todo!()
+    pub fn set(&mut self, index: usize, value: bool) -> Option<bool> {
+        if index >= self.len() {
+            return None;
+        }
+
+        let old_value = self.get(index);
+
+        match self.bits {
+            SmolBitVecVariant::Inline(ref mut bits) => {
+                let mask = 1usize << index;
+
+                if value {
+                    // Toggle the bit ON if it was OFF, leave it on otherwise
+                    *bits |= mask
+                } else {
+                    // Invert the mask, making every bits ON except at index
+                    // &= will turn the bit at index in bits to OFF
+                    *bits &= !mask
+                }
+            }
+        }
+
+        old_value
     }
 
     pub fn len(&self) -> usize {
@@ -45,7 +80,25 @@ impl SmolBitVec {
     }
 
     pub fn pop(&mut self) -> Option<bool> {
-        todo!()
+        if self.is_empty() {
+            return None;
+        }
+
+        let last_index = self.len() - 1;
+        let value = self.get(self.len() - 1);
+
+        match self.bits {
+            SmolBitVecVariant::Inline(ref mut bits) => {
+                // All bits are ON except for the target bit, which is OFF after !
+                let mask = !(1usize << last_index);
+
+                *bits &= mask;
+            }
+        }
+
+        self.len -= 1;
+
+        value
     }
 }
 
@@ -218,5 +271,76 @@ mod tests {
     fn test_default() {
         let bv = SmolBitVec::default();
         assert!(bv.is_empty());
+    }
+
+    #[test]
+    fn test_inline_specific_behavior() {
+        let mut bv = SmolBitVec::new();
+        // Test empty state
+        assert_eq!(bv.get(0), None);
+        assert_eq!(bv.pop(), None);
+        // Verify out-of-bounds set fails safely
+        assert_eq!(bv.set(0, true), None);
+
+        // Test single bit
+        bv.push(true);
+        assert_eq!(bv.len(), 1);
+        assert_eq!(bv.get(0), Some(true));
+        assert_eq!(bv.get(1), None);
+
+        // Test set and get within inline capacity
+        assert_eq!(bv.set(0, false), Some(true));
+        assert_eq!(bv.get(0), Some(false));
+
+        // Test pop
+        assert_eq!(bv.pop(), Some(false));
+        assert_eq!(bv.len(), 0);
+    }
+
+    #[test]
+    fn test_pop_corruption_guard() {
+        let mut bv = SmolBitVec::new();
+
+        // Push [true, false, true]
+        bv.push(true); // Index 0
+        bv.push(false); // Index 1
+        bv.push(true); // Index 2
+
+        // Pop the last item (Index 2). It should be true.
+        assert_eq!(bv.pop(), Some(true));
+        assert_eq!(bv.len(), 2);
+
+        // CRITICAL GUARD: Verify that the remaining bits were NOT shifted!
+        assert_eq!(bv.get(0), Some(true), "Index 0 was corrupted by pop!");
+        assert_eq!(bv.get(1), Some(false), "Index 1 was corrupted by pop!");
+    }
+
+    #[test]
+    fn test_inline_full_capacity() {
+        let mut bv = SmolBitVec::new();
+        let cap = usize::BITS as usize;
+
+        for i in 0..cap {
+            bv.push(i % 3 == 0);
+        }
+
+        assert_eq!(bv.len(), cap);
+
+        for i in 0..cap {
+            assert_eq!(bv.get(i), Some(i % 3 == 0));
+        }
+    }
+
+    #[test]
+    fn test_inline_set_return_value() {
+        let mut bv = SmolBitVec::new();
+        bv.push(true);
+
+        assert_eq!(bv.set(0, false), Some(true));
+        assert_eq!(bv.get(0), Some(false));
+        assert_eq!(bv.set(0, true), Some(false));
+        assert_eq!(bv.get(0), Some(true));
+
+        assert_eq!(bv.set(1, true), None);
     }
 }
