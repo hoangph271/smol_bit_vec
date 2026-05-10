@@ -50,4 +50,5 @@ The test suite must rigorously verify the following conditions:
 * **Heap Spillover Boundary:** Assert correct state transition and memory allocation at exactly `usize::BITS`, `usize::BITS - 1`, and `usize::BITS + 1`.
 * **Data Integrity Across Blocks:** Verify `get` and `set` accurately address bits spanning multiple `usize` blocks in the spilled state.
 * **Trait Contract Verification:** Assert `FromIterator` and `Extend` correctly construct and mutate the vector, matching the exact behavior of `Vec<bool>`.
-*
+* **Memory Efficiency:** Verify that the vector maintains a small, constant stack footprint for the inline variant and uses exactly 1 bit per boolean in both states.
+
