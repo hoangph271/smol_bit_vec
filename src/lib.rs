@@ -343,4 +343,32 @@ mod tests {
 
         assert_eq!(bv.set(1, true), None);
     }
+
+    #[test]
+    fn test_inline_memory_layout() {
+        use std::mem::size_of;
+
+        // On 64-bit systems:
+        // len (8 bytes)
+        // bits (8 bytes) -> SmolBitVecVariant is optimized to 8 bytes because it has only one variant
+        // Total = 16 bytes (2 usizes)
+
+        // When we add another variant later, this will likely jump to 3 usizes (24 bytes)
+        // to accommodate the enum tag.
+
+        let expected_total_size = size_of::<usize>() * 2;
+        let expected_variant_size = size_of::<usize>();
+
+        assert_eq!(
+            size_of::<SmolBitVec>(),
+            expected_total_size,
+            "SmolBitVec size on stack should be 2 usizes (optimized single-variant enum)"
+        );
+
+        assert_eq!(
+            size_of::<SmolBitVecVariant>(),
+            expected_variant_size,
+            "Internal variant enum should be 1 usize (optimized)"
+        );
+    }
 }
