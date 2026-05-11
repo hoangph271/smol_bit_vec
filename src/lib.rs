@@ -1,3 +1,5 @@
+use std::iter::FusedIterator;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SmolBitVecVariant {
     Inline(usize),
@@ -113,7 +115,7 @@ impl Default for SmolBitVec {
 
 impl std::fmt::Debug for SmolBitVec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SmolBitVec").finish()
+        f.debug_list().entries(self.into_iter()).finish()
     }
 }
 
@@ -125,22 +127,46 @@ impl FromIterator<bool> for SmolBitVec {
 
 pub struct SmolBitVecIter<'a> {
     vec: &'a SmolBitVec,
+    index: usize,
 }
 
 impl<'a> Iterator for SmolBitVecIter<'a> {
     type Item = bool;
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        if self.index >= self.vec.len() {
+            return None;
+        }
+
+        let value = self.vec.get(self.index);
+        self.index += 1;
+
+        value
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.vec.len() - self.index;
+        (remaining, Some(remaining))
     }
 }
+
+impl<'a> ExactSizeIterator for SmolBitVecIter<'a> {
+    fn len(&self) -> usize {
+        self.vec.len() - self.index
+    }
+}
+
+impl<'a> FusedIterator for SmolBitVecIter<'a> {}
 
 impl<'a> IntoIterator for &'a SmolBitVec {
     type Item = bool;
     type IntoIter = SmolBitVecIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        todo!()
+        Self::IntoIter {
+            vec: self,
+            index: 0,
+        }
     }
 }
 
