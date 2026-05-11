@@ -3,12 +3,17 @@ use std::iter::FusedIterator;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SmolBitVecVariant {
     Inline(usize),
+    Heap(Vec<bool>),
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct SmolBitVec {
     len: usize,
     bits: SmolBitVecVariant,
+}
+
+fn is_inlineable_len(len: usize) -> bool {
+    len <= usize::BITS as usize
 }
 
 impl SmolBitVec {
@@ -21,13 +26,30 @@ impl SmolBitVec {
     }
 
     pub fn push(&mut self, value: bool) {
-        if value {
-            match self.bits {
-                SmolBitVecVariant::Inline(bits) => {
-                    let mask = 1usize << self.len();
+        let len = self.len();
 
-                    self.bits = SmolBitVecVariant::Inline(bits | mask);
+        match &mut self.bits {
+            SmolBitVecVariant::Inline(bits) => {
+                if is_inlineable_len(len + 1) {
+                    if value {
+                        let mask = 1usize << len;
+
+                        self.bits = SmolBitVecVariant::Inline(*bits | mask);
+                    }
+                } else {
+                    let mut bits = Vec::with_capacity(len + 1);
+
+                    for bit in self.into_iter() {
+                        bits.push(bit);
+                    }
+
+                    bits.push(value);
+
+                    self.bits = SmolBitVecVariant::Heap(bits);
                 }
+            }
+            SmolBitVecVariant::Heap(items) => {
+                items.push(value);
             }
         }
 
@@ -39,16 +61,17 @@ impl SmolBitVec {
             return None;
         }
 
-        match self.bits {
-            SmolBitVecVariant::Inline(bits) => {
-                if index >= self.len() {
-                    return None;
-                }
+        if index >= self.len() {
+            return None;
+        }
 
+        match &self.bits {
+            SmolBitVecVariant::Inline(bits) => {
                 let mask = 1usize << index;
 
                 Some(bits & mask != 0)
             }
+            SmolBitVecVariant::Heap(items) => Some(items[index]),
         }
     }
 
@@ -59,8 +82,8 @@ impl SmolBitVec {
 
         let old_value = self.get(index);
 
-        match self.bits {
-            SmolBitVecVariant::Inline(ref mut bits) => {
+        match &mut self.bits {
+            SmolBitVecVariant::Inline(bits) => {
                 let mask = 1usize << index;
 
                 if value {
@@ -71,6 +94,9 @@ impl SmolBitVec {
                     // &= will turn the bit at index in bits to OFF
                     *bits &= !mask
                 }
+            }
+            SmolBitVecVariant::Heap(items) => {
+                items[index] = value;
             }
         }
 
@@ -89,12 +115,15 @@ impl SmolBitVec {
         let last_index = self.len() - 1;
         let value = self.get(self.len() - 1);
 
-        match self.bits {
-            SmolBitVecVariant::Inline(ref mut bits) => {
+        match &mut self.bits {
+            SmolBitVecVariant::Inline(bits) => {
                 // All bits are ON except for the target bit, which is OFF after !
                 let mask = !(1usize << last_index);
 
                 *bits &= mask;
+            }
+            SmolBitVecVariant::Heap(items) => {
+                items.pop();
             }
         }
 
@@ -121,7 +150,16 @@ impl std::fmt::Debug for SmolBitVec {
 
 impl FromIterator<bool> for SmolBitVec {
     fn from_iter<T: IntoIterator<Item = bool>>(iter: T) -> Self {
-        todo!()
+        let mut smol_bit_vec = Self::new();
+
+        // TODO: This is inefficient
+        // We should remove the loop entirely
+        // Only here to fulfill the trait requirement
+        for value in iter.into_iter() {
+            smol_bit_vec.push(value);
+        }
+
+        smol_bit_vec
     }
 }
 
@@ -171,8 +209,12 @@ impl<'a> IntoIterator for &'a SmolBitVec {
 }
 
 impl Extend<bool> for SmolBitVec {
-    fn extend<T: IntoIterator<Item = bool>>(&mut self, _iter: T) {
-        todo!()
+    fn extend<T: IntoIterator<Item = bool>>(&mut self, iter: T) {
+        // TODO: Optimize by reserving capacity in advance
+        // Pushing one item at a time is inefficient
+        for item in iter {
+            self.push(item);
+        }
     }
 }
 
@@ -376,25 +418,30 @@ mod tests {
 
         // On 64-bit systems:
         // len (8 bytes)
-        // bits (8 bytes) -> SmolBitVecVariant is optimized to 8 bytes because it has only one variant
-        // Total = 16 bytes (2 usizes)
+        // bits (24 bytes) -> SmolBitVecVariant is 24 bytes because it contains a Vec (24 bytes).
+        //                    Rust uses the Vec's pointer niche to fit the Inline(usize) variant.
+        // Total = 32 bytes (4 usizes)
 
-        // When we add another variant later, this will likely jump to 3 usizes (24 bytes)
-        // to accommodate the enum tag.
-
-        let expected_total_size = size_of::<usize>() * 2;
-        let expected_variant_size = size_of::<usize>();
+        let expected_total_size = size_of::<usize>() * 4;
+        let expected_variant_size = size_of::<usize>() * 3;
 
         assert_eq!(
             size_of::<SmolBitVec>(),
             expected_total_size,
-            "SmolBitVec size on stack should be 2 usizes (optimized single-variant enum)"
+            "SmolBitVec size on stack should be 4 usizes (len + bits)"
         );
 
         assert_eq!(
             size_of::<SmolBitVecVariant>(),
             expected_variant_size,
-            "Internal variant enum should be 1 usize (optimized)"
+            "Internal variant enum should be 3 usizes (size of Vec)"
         );
     }
+
+    // TODO: Add test for spillover exactly at the boundary (e.g., 64 to 65 bits)
+    // TODO: Add test for pushing 'false' as the 65th bit (ensure it's not lost)
+    // TODO: Add test for pop-back: shrinking from Heap back to Inline variant
+    // TODO: Add test for get/set/pop operations on the Heap variant
+    // TODO: Add test for very large bit vectors (multiple blocks of usize)
+    // TODO: Add test for FromIterator and Extend with more than 64 items
 }
