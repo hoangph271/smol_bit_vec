@@ -438,10 +438,110 @@ mod tests {
         );
     }
 
-    // TODO: Add test for spillover exactly at the boundary (e.g., 64 to 65 bits)
-    // TODO: Add test for pushing 'false' as the 65th bit (ensure it's not lost)
-    // TODO: Add test for pop-back: shrinking from Heap back to Inline variant
-    // TODO: Add test for get/set/pop operations on the Heap variant
-    // TODO: Add test for very large bit vectors (multiple blocks of usize)
-    // TODO: Add test for FromIterator and Extend with more than 64 items
+    #[test]
+    fn test_spillover_exactly_at_boundary() {
+        let mut bv = SmolBitVec::new();
+        let cap = usize::BITS as usize;
+
+        // Fill to capacity
+        for _ in 0..cap {
+            bv.push(true);
+        }
+        assert!(matches!(bv.bits, SmolBitVecVariant::Inline(_)));
+
+        // Push 65th bit (should spill)
+        bv.push(false);
+        assert_eq!(bv.len(), cap + 1);
+        assert!(matches!(bv.bits, SmolBitVecVariant::Heap(_)));
+
+        // Verify all bits
+        for i in 0..cap {
+            assert_eq!(
+                bv.get(i),
+                Some(true),
+                "Bit at index {} was corrupted during spill",
+                i
+            );
+        }
+        assert_eq!(bv.get(cap), Some(false));
+    }
+
+    #[test]
+    fn test_heap_get_set_pop() {
+        let mut bv = SmolBitVec::new();
+        let size = (usize::BITS + 10) as usize;
+
+        for i in 0..size {
+            bv.push(i % 2 == 0);
+        }
+
+        // Test get
+        for i in 0..size {
+            assert_eq!(bv.get(i), Some(i % 2 == 0));
+        }
+
+        // Test set
+        bv.set(0, false);
+        bv.set(size - 1, true);
+        assert_eq!(bv.get(0), Some(false));
+        assert_eq!(bv.get(size - 1), Some(true));
+
+        // Test pop
+        assert_eq!(bv.pop(), Some(true));
+        assert_eq!(bv.len(), size - 1);
+    }
+
+    #[test]
+    fn test_very_large_bit_vec() {
+        let mut bv = SmolBitVec::new();
+        let size = 1000;
+
+        for i in 0..size {
+            bv.push(i % 7 == 0);
+        }
+
+        assert_eq!(bv.len(), size);
+        for i in 0..size {
+            assert_eq!(bv.get(i), Some(i % 7 == 0));
+        }
+    }
+
+    #[test]
+    fn test_from_iterator_and_extend_large() {
+        let size = 200;
+        let bits: Vec<bool> = (0..size).map(|i| i % 3 == 0).collect();
+
+        let mut bv: SmolBitVec = bits.iter().copied().collect();
+        assert_eq!(bv.len(), size);
+        assert!(matches!(bv.bits, SmolBitVecVariant::Heap(_)));
+
+        let extra: Vec<bool> = (0..size).map(|i| i % 5 == 0).collect();
+        bv.extend(extra.iter().copied());
+
+        assert_eq!(bv.len(), size * 2);
+        for i in 0..size {
+            assert_eq!(bv.get(i), Some(bits[i]));
+            assert_eq!(bv.get(i + size), Some(extra[i]));
+        }
+    }
+
+    #[test]
+    fn test_pop_back_to_inline_behavior() {
+        let mut bv = SmolBitVec::new();
+        let cap = usize::BITS as usize;
+
+        for _ in 0..cap + 1 {
+            bv.push(true);
+        }
+        assert!(matches!(bv.bits, SmolBitVecVariant::Heap(_)));
+
+        bv.pop();
+        // Currently, our implementation stays in Heap variant even when size drops.
+        // This test documents that behavior.
+        assert_eq!(bv.len(), cap);
+        assert!(
+            matches!(bv.bits, SmolBitVecVariant::Heap(_)),
+            "Should currently stay in Heap variant"
+        );
+    }
 }
