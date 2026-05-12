@@ -6,11 +6,27 @@ enum SmolBitVecVariant {
     Heap(Vec<bool>),
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct SmolBitVec {
     len: usize,
     bits: SmolBitVecVariant,
 }
+
+impl PartialEq for SmolBitVec {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+
+        match (&self.bits, &other.bits) {
+            (SmolBitVecVariant::Inline(a), SmolBitVecVariant::Inline(b)) => a == b,
+            _ => self.into_iter().eq(other.into_iter()),
+        }
+    }
+}
+
+// TODO: Optimize Heap storage. Vec<bool> uses 1 byte per bit.
+// A more efficient implementation would use Vec<usize> to pack 64 bits per element.
 
 fn is_inlineable_len(len: usize) -> bool {
     len <= usize::BITS as usize
@@ -37,6 +53,8 @@ impl SmolBitVec {
                         self.bits = SmolBitVecVariant::Inline(*bits | mask);
                     }
                 } else {
+                    // TODO: Optimize spillover by using bitwise operations on `*bits`
+                    // instead of iterating through self.into_iter().
                     let mut bits = Vec::with_capacity(len + 1);
 
                     for bit in self.into_iter() {
@@ -543,5 +561,63 @@ mod tests {
             matches!(bv.bits, SmolBitVecVariant::Heap(_)),
             "Should currently stay in Heap variant"
         );
+    }
+
+    #[test]
+    fn test_heap_compactness_bug() {
+        let mut bv = SmolBitVec::new();
+        let cap = usize::BITS as usize;
+        for _ in 0..cap + 1 {
+            bv.push(true);
+        }
+
+        match &bv.bits {
+            SmolBitVecVariant::Heap(items) => {
+                // Goal: 1 bit per value.
+                // Current reality: Vec<bool> uses 1 byte (8 bits) per value.
+                let heap_usage_bytes = items.len() * std::mem::size_of::<bool>();
+                let goal_usage_bytes = (items.len() + 7) / 8;
+
+                assert!(
+                    heap_usage_bytes <= goal_usage_bytes,
+                    "Memory Inefficiency: Using {} bytes for {} bits. Goal is {} bytes.",
+                    heap_usage_bytes,
+                    items.len(),
+                    goal_usage_bytes
+                );
+            }
+            _ => panic!("Should be in Heap variant"),
+        }
+    }
+
+    #[test]
+    fn test_equality_consistency_bug() {
+        let mut bv_inline = SmolBitVec::new();
+        let cap = usize::BITS as usize;
+        for _ in 0..cap {
+            bv_inline.push(true);
+        }
+
+        let mut bv_heap = SmolBitVec::new();
+        for _ in 0..cap + 1 {
+            bv_heap.push(true);
+        }
+        bv_heap.pop(); // Now it has 'cap' bits but is in Heap variant
+
+        assert_eq!(
+            bv_inline, bv_heap,
+            "Logic Bug: Vectors with identical bits must be equal regardless of storage variant."
+        );
+    }
+
+    #[test]
+    fn test_large_iteration() {
+        let size = 1000;
+        let bv: SmolBitVec = (0..size).map(|i| i % 2 == 0).collect();
+        let collected: Vec<bool> = (&bv).into_iter().collect();
+        assert_eq!(collected.len(), size);
+        for i in 0..size {
+            assert_eq!(collected[i], i % 2 == 0);
+        }
     }
 }
