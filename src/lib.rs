@@ -18,12 +18,11 @@ impl PartialEq for SmolBitVec {
             return false;
         }
 
-        // TODO: Optimize Heap comparison.
-        // Instead of bit-by-bit iteration, compare the underlying slices directly.
-        // This requires ensuring all bits beyond `len` are strictly zeroed.
         match (&self.bits, &other.bits) {
             (SmolBitVecVariant::Inline(a), SmolBitVecVariant::Inline(b)) => a == b,
-            _ => self.into_iter().eq(other.into_iter()),
+            (SmolBitVecVariant::Heap(a), SmolBitVecVariant::Heap(b)) => a == b,
+            (SmolBitVecVariant::Inline(_), SmolBitVecVariant::Heap(_)) => false,
+            (SmolBitVecVariant::Heap(_), SmolBitVecVariant::Inline(_)) => false,
         }
     }
 }
@@ -94,11 +93,18 @@ impl SmolBitVec {
                 Some(bits & mask != 0)
             }
             SmolBitVecVariant::Heap(items) => {
-                // TODO: Use shifts instead of division/modulo for performance
-                // item_index = index >> 6 (for 64-bit)
-                // item_offset = index & 63
                 let item_index = index / usize::BITS as usize;
                 let item_offset = index % usize::BITS as usize;
+
+                // We can also use bit shift operations to get item_index
+                // and bit AND operations to get item_offset
+                // but the compiler is smart enough to optimize the above into the below
+                // so for readability, we use the above
+
+                // // ? trailing_zeros() gives 6 for 64-bit, so right shift by 6 gives item_index
+                // let item_index = index >> usize::BITS.trailing_zeros();
+                // // ? index & (usize::BITS as usize - 1) gives item_offset (bit position within item)
+                // let item_offset = index & (usize::BITS as usize - 1);
 
                 let item_container = items[item_index];
 
@@ -131,9 +137,6 @@ impl SmolBitVec {
                 Some(old_value)
             }
             SmolBitVecVariant::Heap(items) => {
-                // TODO: Use shifts instead of division/modulo for performance
-                // item_index = index >> 6 (for 64-bit)
-                // item_offset = index & 63
                 let item_index = index / usize::BITS as usize;
                 let item_offset = index % usize::BITS as usize;
 
@@ -869,18 +872,26 @@ mod tests {
         // Block 0: 0..64
         // Block 1: 64..128
         // Block 2: 128 (bit 0 is 1)
-        
+
         bv_large.pop(); // Pop bit 128. Block 2 should be removed.
-        
+
         if let SmolBitVecVariant::Heap(ref items) = bv_large.bits {
-            assert_eq!(items.len(), 2, "Should have 2 blocks (0 and 1) after popping the only bit in block 2");
+            assert_eq!(
+                items.len(),
+                2,
+                "Should have 2 blocks (0 and 1) after popping the only bit in block 2"
+            );
         }
-        
+
         // Now test clearing a bit WITHIN a block
         bv_large.pop(); // Pop bit 127. Bit 63 of block 1 should be zeroed.
         if let SmolBitVecVariant::Heap(ref items) = bv_large.bits {
-            let offset_in_block_1 = 63; 
-            assert_eq!(items[1] & (1usize << offset_in_block_1), 0, "The popped bit 127 (offset 63 in block 1) should be zeroed");
+            let offset_in_block_1 = 63;
+            assert_eq!(
+                items[1] & (1usize << offset_in_block_1),
+                0,
+                "The popped bit 127 (offset 63 in block 1) should be zeroed"
+            );
         }
     }
 
@@ -894,5 +905,111 @@ mod tests {
         for i in 0..1000 {
             assert_eq!(bv.get(i), Some(bits[i]));
         }
+    }
+
+    #[test]
+    fn test_partial_eq_optimized_heap() {
+        let mut bv1 = SmolBitVec::new();
+        let mut bv2 = SmolBitVec::new();
+        let size = (usize::BITS * 2 + 10) as usize;
+
+        for i in 0..size {
+            let b = i % 3 == 0;
+            bv1.push(b);
+            bv2.push(b);
+        }
+
+        // Test identical heap vectors
+        assert_eq!(bv1, bv2);
+
+        // Test difference in a single bit
+        bv2.set(size - 1, !bv2.get(size - 1).unwrap());
+        assert_ne!(bv1, bv2);
+
+        // Reset and test again
+        bv2.set(size - 1, bv1.get(size - 1).unwrap());
+        assert_eq!(bv1, bv2);
+    }
+
+    #[test]
+    fn test_partial_eq_cleanliness_after_set() {
+        let mut bv1 = SmolBitVec::new();
+        let mut bv2 = SmolBitVec::new();
+
+        bv1.push(true);
+        bv2.push(true);
+
+        // Logical state: [true]
+        assert_eq!(bv1, bv2);
+
+        // set(0, true) should be a no-op logically,
+        // but we must ensure it doesn't corrupt high bits.
+        bv1.set(0, true);
+        assert_eq!(bv1, bv2);
+
+        // set(0, false) followed by set(0, true)
+        bv1.set(0, false);
+        bv1.set(0, true);
+        assert_eq!(bv1, bv2);
+    }
+
+    #[test]
+    fn test_partial_eq_canonical_variants() {
+        let mut bv1 = SmolBitVec::new();
+        let cap = usize::BITS as usize;
+
+        for _ in 0..cap {
+            bv1.push(true);
+        }
+
+        let mut bv2 = SmolBitVec::new();
+        for _ in 0..cap + 1 {
+            bv2.push(true);
+        }
+        bv2.pop(); // Should transition back to Inline
+
+        // Both are Inline(cap bits), so they should be equal
+        assert_eq!(bv1, bv2);
+
+        // Ensure they are both actually Inline
+        assert!(matches!(bv1.bits, SmolBitVecVariant::Inline(_)));
+        assert!(matches!(bv2.bits, SmolBitVecVariant::Inline(_)));
+    }
+
+    #[test]
+    fn test_empty_state_exhaustive() {
+        let bv1 = SmolBitVec::new();
+        let bv2 = SmolBitVec::default();
+
+        // Basic properties
+        assert!(bv1.is_empty());
+        assert_eq!(bv1.len(), 0);
+
+        // Equality
+        assert_eq!(bv1, bv2);
+
+        // Iteration
+        let mut iter = (&bv1).into_iter();
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.len(), 0);
+
+        // Cloning
+        let bv3 = bv1.clone();
+        assert!(bv3.is_empty());
+        assert_eq!(bv1, bv3);
+
+        // Debug format
+        assert_eq!(format!("{:?}", bv1), "[]");
+
+        // FromIterator
+        let bv4: SmolBitVec = std::iter::empty::<bool>().collect();
+        assert!(bv4.is_empty());
+        assert_eq!(bv1, bv4);
+
+        // Extend
+        let mut bv5 = SmolBitVec::new();
+        bv5.extend(std::iter::empty::<bool>());
+        assert!(bv5.is_empty());
+        assert_eq!(bv1, bv5);
     }
 }
