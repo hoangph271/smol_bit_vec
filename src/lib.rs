@@ -18,6 +18,9 @@ impl PartialEq for SmolBitVec {
             return false;
         }
 
+        // TODO: Optimize Heap comparison.
+        // Instead of bit-by-bit iteration, compare the underlying slices directly.
+        // This requires ensuring all bits beyond `len` are strictly zeroed.
         match (&self.bits, &other.bits) {
             (SmolBitVecVariant::Inline(a), SmolBitVecVariant::Inline(b)) => a == b,
             _ => self.into_iter().eq(other.into_iter()),
@@ -91,6 +94,9 @@ impl SmolBitVec {
                 Some(bits & mask != 0)
             }
             SmolBitVecVariant::Heap(items) => {
+                // TODO: Use shifts instead of division/modulo for performance
+                // item_index = index >> 6 (for 64-bit)
+                // item_offset = index & 63
                 let item_index = index / usize::BITS as usize;
                 let item_offset = index % usize::BITS as usize;
 
@@ -125,6 +131,9 @@ impl SmolBitVec {
                 Some(old_value)
             }
             SmolBitVecVariant::Heap(items) => {
+                // TODO: Use shifts instead of division/modulo for performance
+                // item_index = index >> 6 (for 64-bit)
+                // item_offset = index & 63
                 let item_index = index / usize::BITS as usize;
                 let item_offset = index % usize::BITS as usize;
 
@@ -273,8 +282,9 @@ impl<'a> IntoIterator for &'a SmolBitVec {
 
 impl Extend<bool> for SmolBitVec {
     fn extend<T: IntoIterator<Item = bool>>(&mut self, iter: T) {
-        // TODO: Optimize by reserving capacity in advance
-        // Pushing one item at a time is inefficient
+        // TODO: Optimize by checking size_hint() and performing bulk transitions.
+        // If we know we are adding many bits, transition to Heap once and
+        // fill entire usize blocks at a time.
         for item in iter {
             self.push(item);
         }
@@ -799,5 +809,90 @@ mod tests {
         // Now it's Heap
         assert_eq!(bv.get(bv.len()), None);
         assert_eq!(bv.set(bv.len(), true), None);
+    }
+
+    #[test]
+    fn test_dirty_bits_equality_guard() {
+        // This test simulates "dirty" bits beyond the logical length
+        // to ensure equality remains robust.
+        let mut bv1 = SmolBitVec::new();
+        bv1.push(true); // len 1, bit 0 is true
+
+        let mut bv2 = bv1.clone();
+
+        // Manually corrupt bv2's internal state with "garbage" in high bits
+        unsafe {
+            let ptr = &mut bv2 as *mut SmolBitVec;
+            let variant_ptr = &mut (*ptr).bits as *mut SmolBitVecVariant;
+            if let SmolBitVecVariant::Inline(ref mut bits) = *variant_ptr {
+                *bits |= 0xAAAA_AAAA_AAAA_AAAA; // Set a bunch of high bits
+            }
+        }
+
+        // Currently, our Inline PartialEq is `a == b`, so this SHOULD FAIL if bits are dirty.
+        // This confirms that our current implementation RELIES on bit cleanliness.
+        assert_ne!(
+            bv1, bv2,
+            "Equality should fail because high bits are dirty and we don't mask in PartialEq"
+        );
+    }
+
+    #[test]
+    fn test_heap_cleanliness() {
+        let mut bv = SmolBitVec::new();
+        let cap = usize::BITS as usize;
+
+        // Fill first block, then add one bit to second block
+        for _ in 0..cap {
+            bv.push(false);
+        }
+        bv.push(true); // Index cap is true
+
+        // Pop the true bit. The second block (items[1]) should be cleared.
+        bv.pop();
+
+        // If we are still in Heap (we shouldn't be, it transitions to Inline at next_len == cap),
+        // but let's check the transition logic.
+        // In `pop`, if next_len == cap, it does `Inline(items[0])`.
+        // If items[0] had any bits set > cap, they would persist.
+
+        assert_eq!(bv.len(), cap);
+        assert!(matches!(bv.bits, SmolBitVecVariant::Inline(_)));
+
+        // Test Heap cleanliness without triggering Inline transition
+        let mut bv_large = SmolBitVec::new();
+        // Use 2 full blocks + 1 bit
+        for _ in 0..cap * 2 + 1 {
+            bv_large.push(true);
+        }
+        // Bit at index cap*2 (bit 0 of block 2) is true.
+        // Block 0: 0..64
+        // Block 1: 64..128
+        // Block 2: 128 (bit 0 is 1)
+        
+        bv_large.pop(); // Pop bit 128. Block 2 should be removed.
+        
+        if let SmolBitVecVariant::Heap(ref items) = bv_large.bits {
+            assert_eq!(items.len(), 2, "Should have 2 blocks (0 and 1) after popping the only bit in block 2");
+        }
+        
+        // Now test clearing a bit WITHIN a block
+        bv_large.pop(); // Pop bit 127. Bit 63 of block 1 should be zeroed.
+        if let SmolBitVecVariant::Heap(ref items) = bv_large.bits {
+            let offset_in_block_1 = 63; 
+            assert_eq!(items[1] & (1usize << offset_in_block_1), 0, "The popped bit 127 (offset 63 in block 1) should be zeroed");
+        }
+    }
+
+    #[test]
+    fn test_bulk_extend_integrity() {
+        let mut bv = SmolBitVec::new();
+        let bits: Vec<bool> = (0..1000).map(|i| i % 3 == 0).collect();
+        bv.extend(bits.clone());
+
+        assert_eq!(bv.len(), 1000);
+        for i in 0..1000 {
+            assert_eq!(bv.get(i), Some(bits[i]));
+        }
     }
 }
