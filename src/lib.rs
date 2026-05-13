@@ -8,6 +8,9 @@ enum SmolBitVecVariant {
 
 #[derive(Clone)]
 pub struct SmolBitVec {
+    // TODO (5): Memory Layout Optimization.
+    // Currently 40 bytes on 64-bit systems. 
+    // Consider using Box<[usize]> or niche optimizations to shrink to 24-32 bytes.
     len: usize,
     bits: SmolBitVecVariant,
 }
@@ -32,6 +35,15 @@ fn is_inlineable_len(len: usize) -> bool {
 }
 
 impl SmolBitVec {
+    // TODO (1): Architectural Cleanup.
+    // - Define `const BITS: usize = usize::BITS as usize;` to replace magic numbers.
+    // - Implement `clear()`, `last()`, and `reserve(additional)`.
+
+    // TODO (6): API Ergonomics.
+    // - Add `#[must_use]` to read-only methods.
+    // - Add full doc comments with examples.
+    // - Implement `std::fmt::Binary` or `Display`.
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -297,6 +309,10 @@ impl Extend<bool> for SmolBitVec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // TODO (7): Property-Based Testing.
+    // Use `proptest` or `fuzzing` to verify Inline <-> Heap transitions 
+    // and structural integrity under random operation sequences.
 
     #[test]
     fn test_new_and_empty() {
