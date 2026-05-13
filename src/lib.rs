@@ -675,4 +675,129 @@ mod tests {
             assert_eq!(collected[i], i % 2 == 0);
         }
     }
+
+    #[test]
+    fn test_clone_independence() {
+        let mut bv1 = SmolBitVec::new();
+        let cap = usize::BITS as usize;
+
+        // Test Inline Clone
+        bv1.push(true);
+        let mut bv2 = bv1.clone();
+        bv2.set(0, false);
+        assert_eq!(bv1.get(0), Some(true));
+        assert_eq!(bv2.get(0), Some(false));
+
+        // Test Heap Clone
+        for _ in 0..cap {
+            bv1.push(false);
+        }
+        assert!(matches!(bv1.bits, SmolBitVecVariant::Heap(_)));
+        let mut bv3 = bv1.clone();
+        bv3.set(cap, true);
+        assert_eq!(bv1.get(cap), Some(false));
+        assert_eq!(bv3.get(cap), Some(true));
+    }
+
+    #[test]
+    fn test_multiple_transitions() {
+        let mut bv = SmolBitVec::new();
+        let cap = usize::BITS as usize;
+
+        // Inline -> Heap
+        for _ in 0..cap + 1 {
+            bv.push(true);
+        }
+        assert!(matches!(bv.bits, SmolBitVecVariant::Heap(_)));
+
+        // Heap -> Inline
+        for _ in 0..cap + 1 {
+            bv.pop();
+        }
+        assert!(matches!(bv.bits, SmolBitVecVariant::Inline(_)));
+        assert!(bv.is_empty());
+
+        // Inline -> Heap again
+        for _ in 0..cap + 1 {
+            bv.push(false);
+        }
+        assert!(matches!(bv.bits, SmolBitVecVariant::Heap(_)));
+    }
+
+    #[test]
+    fn test_iterator_exactness() {
+        let size = 100;
+        let bv: SmolBitVec = (0..size).map(|_| true).collect();
+        let mut iter = (&bv).into_iter();
+
+        assert_eq!(iter.len(), size);
+        let (min, max) = iter.size_hint();
+        assert_eq!(min, size);
+        assert_eq!(max, Some(size));
+
+        iter.next();
+        assert_eq!(iter.len(), size - 1);
+        let (min, max) = iter.size_hint();
+        assert_eq!(min, size - 1);
+        assert_eq!(max, Some(size - 1));
+    }
+
+    #[test]
+    fn test_pop_until_empty_from_heap() {
+        let mut bv = SmolBitVec::new();
+        let size = 200;
+        for i in 0..size {
+            bv.push(i % 2 == 0);
+        }
+
+        for i in (0..size).rev() {
+            assert_eq!(bv.pop(), Some(i % 2 == 0));
+        }
+
+        assert!(bv.is_empty());
+        assert_eq!(bv.len(), 0);
+        assert!(matches!(bv.bits, SmolBitVecVariant::Inline(0)));
+        assert_eq!(bv.pop(), None);
+    }
+
+    #[test]
+    fn test_bit_persistence_around_boundaries() {
+        let mut bv = SmolBitVec::new();
+        let cap = usize::BITS as usize;
+        let size = cap * 2;
+
+        for _ in 0..size {
+            bv.push(false);
+        }
+
+        // Set bit at boundary (e.g., bit 64)
+        bv.set(cap, true);
+        assert_eq!(bv.get(cap), Some(true));
+        assert_eq!(bv.get(cap - 1), Some(false));
+        assert_eq!(bv.get(cap + 1), Some(false));
+
+        // Set bit at index 0
+        bv.set(0, true);
+        assert_eq!(bv.get(0), Some(true));
+        assert_eq!(bv.get(1), Some(false));
+    }
+
+    #[test]
+    fn test_out_of_bounds_explicit() {
+        let mut bv = SmolBitVec::new();
+        assert_eq!(bv.get(0), None);
+        assert_eq!(bv.set(0, true), None);
+
+        bv.push(true);
+        assert_eq!(bv.get(1), None);
+        assert_eq!(bv.set(1, false), None);
+
+        let cap = usize::BITS as usize;
+        for _ in 0..cap {
+            bv.push(true);
+        }
+        // Now it's Heap
+        assert_eq!(bv.get(bv.len()), None);
+        assert_eq!(bv.set(bv.len(), true), None);
+    }
 }
