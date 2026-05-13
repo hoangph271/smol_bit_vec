@@ -3,7 +3,7 @@ use std::iter::FusedIterator;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SmolBitVecVariant {
     Inline(usize),
-    Heap(Vec<bool>),
+    Heap(Vec<usize>),
 }
 
 #[derive(Clone)]
@@ -25,9 +25,6 @@ impl PartialEq for SmolBitVec {
     }
 }
 
-// TODO: Optimize Heap storage. Vec<bool> uses 1 byte per bit.
-// A more efficient implementation would use Vec<usize> to pack 64 bits per element.
-
 fn is_inlineable_len(len: usize) -> bool {
     len <= usize::BITS as usize
 }
@@ -43,42 +40,46 @@ impl SmolBitVec {
 
     pub fn push(&mut self, value: bool) {
         let len = self.len();
+        let next_len = len + 1;
 
         match &mut self.bits {
             SmolBitVecVariant::Inline(bits) => {
-                if is_inlineable_len(len + 1) {
+                if is_inlineable_len(next_len) {
                     if value {
                         let mask = 1usize << len;
 
-                        self.bits = SmolBitVecVariant::Inline(*bits | mask);
+                        *bits |= mask;
                     }
                 } else {
-                    // TODO: Optimize spillover by using bitwise operations on `*bits`
-                    // instead of iterating through self.into_iter().
-                    let mut bits = Vec::with_capacity(len + 1);
+                    let mut bits_vec: Vec<usize> = Vec::with_capacity(2);
+                    bits_vec.push(*bits);
 
-                    for bit in self.into_iter() {
-                        bits.push(bit);
-                    }
-
-                    bits.push(value);
-
-                    self.bits = SmolBitVecVariant::Heap(bits);
+                    bits_vec.push(value as usize);
+                    self.bits = SmolBitVecVariant::Heap(bits_vec);
                 }
             }
             SmolBitVecVariant::Heap(items) => {
-                items.push(value);
+                let needs_new_item = len % usize::BITS as usize == 0;
+
+                if needs_new_item {
+                    items.push(if value { 1 } else { 0 });
+                } else {
+                    if value {
+                        let item_offset = len % usize::BITS as usize;
+                        let mask = 1usize << item_offset;
+
+                        if let Some(last) = items.last_mut() {
+                            *last |= mask;
+                        }
+                    }
+                }
             }
         }
 
-        self.len += 1;
+        self.len = next_len;
     }
 
     pub fn get(&self, index: usize) -> Option<bool> {
-        if self.is_empty() {
-            return None;
-        }
-
         if index >= self.len() {
             return None;
         }
@@ -89,7 +90,16 @@ impl SmolBitVec {
 
                 Some(bits & mask != 0)
             }
-            SmolBitVecVariant::Heap(items) => Some(items[index]),
+            SmolBitVecVariant::Heap(items) => {
+                let item_index = index / usize::BITS as usize;
+                let item_offset = index % usize::BITS as usize;
+
+                let item_container = items[item_index];
+
+                let mask = 1usize << item_offset;
+
+                Some(item_container & mask != 0)
+            }
         }
     }
 
@@ -98,11 +108,10 @@ impl SmolBitVec {
             return None;
         }
 
-        let old_value = self.get(index);
-
         match &mut self.bits {
             SmolBitVecVariant::Inline(bits) => {
                 let mask = 1usize << index;
+                let old_value = *bits & mask != 0;
 
                 if value {
                     // Toggle the bit ON if it was OFF, leave it on otherwise
@@ -112,13 +121,31 @@ impl SmolBitVec {
                     // &= will turn the bit at index in bits to OFF
                     *bits &= !mask
                 }
+
+                Some(old_value)
             }
             SmolBitVecVariant::Heap(items) => {
-                items[index] = value;
+                let item_index = index / usize::BITS as usize;
+                let item_offset = index % usize::BITS as usize;
+
+                let item_container = items[item_index];
+
+                // Every bit in mask is shifted left by item_offset, so it's 1 at the bit we want to toggle
+                let mask = 1usize << item_offset;
+
+                let old_value = item_container & mask != 0;
+
+                if value {
+                    // Toggle the bit ON if it was OFF, leave it on otherwise
+                    items[item_index] |= mask
+                } else {
+                    // Toggle the bit OFF if it was ON, leave it off otherwise
+                    items[item_index] &= !mask
+                }
+
+                Some(old_value)
             }
         }
-
-        old_value
     }
 
     pub fn len(&self) -> usize {
@@ -131,23 +158,41 @@ impl SmolBitVec {
         }
 
         let last_index = self.len() - 1;
-        let value = self.get(self.len() - 1);
+        let next_len = self.len - 1;
 
-        match &mut self.bits {
+        let value = match &mut self.bits {
             SmolBitVecVariant::Inline(bits) => {
-                // All bits are ON except for the target bit, which is OFF after !
-                let mask = !(1usize << last_index);
+                let mask = 1usize << last_index;
+                let value = *bits & (mask) != 0;
 
-                *bits &= mask;
+                *bits &= !mask;
+
+                value
             }
             SmolBitVecVariant::Heap(items) => {
-                items.pop();
+                let item_index = last_index / usize::BITS as usize;
+                let item_offset = last_index % usize::BITS as usize;
+
+                let value = items[item_index] & (1usize << item_offset) != 0;
+
+                if is_inlineable_len(next_len) {
+                    self.bits = SmolBitVecVariant::Inline(items[0]);
+                } else if item_offset == 0 {
+                    items.pop();
+                } else {
+                    if let Some(block) = items.last_mut() {
+                        let mask = 1usize << item_offset;
+                        *block &= !mask;
+                    }
+                }
+
+                value
             }
-        }
+        };
 
         self.len -= 1;
 
-        value
+        Some(value)
     }
 }
 
@@ -554,36 +599,46 @@ mod tests {
         assert!(matches!(bv.bits, SmolBitVecVariant::Heap(_)));
 
         bv.pop();
-        // Currently, our implementation stays in Heap variant even when size drops.
-        // This test documents that behavior.
+
         assert_eq!(bv.len(), cap);
+
+        // CRITICAL UPDATE: Assert that it successfully downsized back to the stack
         assert!(
-            matches!(bv.bits, SmolBitVecVariant::Heap(_)),
-            "Should currently stay in Heap variant"
+            matches!(bv.bits, SmolBitVecVariant::Inline(_)),
+            "Should aggressively transition back to Inline variant to save memory"
         );
+
+        // Verify that the 64 bits survived the structural transition intact
+        for i in 0..cap {
+            assert_eq!(
+                bv.get(i),
+                Some(true),
+                "Bit {} was corrupted during the transition back to Inline",
+                i
+            );
+        }
     }
 
     #[test]
-    fn test_heap_compactness_bug() {
+    fn test_heap_compactness() {
         let mut bv = SmolBitVec::new();
         let cap = usize::BITS as usize;
-        for _ in 0..cap + 1 {
+        let num_bits = cap + 1;
+        for _ in 0..num_bits {
             bv.push(true);
         }
 
         match &bv.bits {
             SmolBitVecVariant::Heap(items) => {
-                // Goal: 1 bit per value.
-                // Current reality: Vec<bool> uses 1 byte (8 bits) per value.
-                let heap_usage_bytes = items.len() * std::mem::size_of::<bool>();
-                let goal_usage_bytes = (items.len() + 7) / 8;
-
-                assert!(
-                    heap_usage_bytes <= goal_usage_bytes,
-                    "Memory Inefficiency: Using {} bytes for {} bits. Goal is {} bytes.",
-                    heap_usage_bytes,
+                // For cap + 1 bits, we should only need 2 usize blocks if packed.
+                let expected_blocks = (num_bits + cap - 1) / cap;
+                assert_eq!(
                     items.len(),
-                    goal_usage_bytes
+                    expected_blocks,
+                    "Memory Inefficiency: Using {} blocks for {} bits. Expected {} blocks.",
+                    items.len(),
+                    num_bits,
+                    expected_blocks
                 );
             }
             _ => panic!("Should be in Heap variant"),
@@ -591,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn test_equality_consistency_bug() {
+    fn test_equality_consistency() {
         let mut bv_inline = SmolBitVec::new();
         let cap = usize::BITS as usize;
         for _ in 0..cap {
