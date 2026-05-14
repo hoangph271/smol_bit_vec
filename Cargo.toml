@@ -2,5 +2,10 @@
 name = "smol_bit_vec"
 version = "0.1.0"
 edition = "2024"
+description = "A tiny, bit-packed bit vector with Small Vector Optimization (SVO)."
+license = "MIT"
+repository = "https://github.com/hoangph271/smol_bit_vec"
+keywords = ["bitvector", "bitset", "svo", "memory-optimization"]
+categories = ["data-structures"]
 
 [dependencies]
