@@ -27,19 +27,16 @@ impl PartialEq for SmolBitVec {
     }
 }
 
+const BITS_PER_WORD: usize = usize::BITS as usize;
+
 fn is_inlineable_len(len: usize) -> bool {
-    len <= usize::BITS as usize
+    len <= BITS_PER_WORD
 }
 
 impl SmolBitVec {
     // TODO (1): Architectural Cleanup.
     // - Define `const BITS: usize = usize::BITS as usize;` to replace magic numbers.
     // - Implement `clear()`, `last()`, and `reserve(additional)`.
-
-    // TODO (6): API Ergonomics.
-    // - Add `#[must_use]` to read-only methods.
-    // - Add full doc comments with examples.
-    // - Implement `std::fmt::Binary` or `Display`.
 
     pub fn is_empty(&self) -> bool {
         self.len == 0
@@ -66,7 +63,7 @@ impl SmolBitVec {
                 }
             }
             SmolBitVecBits::Heap(items) => {
-                let needs_new_item = len % usize::BITS as usize == 0;
+                let needs_new_item = len.is_multiple_of(BITS_PER_WORD);
 
                 if needs_new_item {
                     *items = items
@@ -77,7 +74,7 @@ impl SmolBitVec {
                         .into_boxed_slice();
                 } else {
                     if value {
-                        let item_offset = len % usize::BITS as usize;
+                        let item_offset = len % BITS_PER_WORD;
                         let mask = 1usize << item_offset;
 
                         if let Some(last) = items.last_mut() {
@@ -103,8 +100,8 @@ impl SmolBitVec {
                 Some(bits & mask != 0)
             }
             SmolBitVecBits::Heap(items) => {
-                let item_index = index / usize::BITS as usize;
-                let item_offset = index % usize::BITS as usize;
+                let item_index = index / BITS_PER_WORD;
+                let item_offset = index % BITS_PER_WORD;
 
                 // We can also use bit shift operations to get item_index
                 // and bit AND operations to get item_offset
@@ -112,9 +109,9 @@ impl SmolBitVec {
                 // so for readability, we use the above
 
                 // // ? trailing_zeros() gives 6 for 64-bit, so right shift by 6 gives item_index
-                // let item_index = index >> usize::BITS.trailing_zeros();
-                // // ? index & (usize::BITS as usize - 1) gives item_offset (bit position within item)
-                // let item_offset = index & (usize::BITS as usize - 1);
+                // let item_index = index >> BITS_PER_WORD.trailing_zeros();
+                // // ? index & (BITS_PER_WORD - 1) gives item_offset (bit position within item)
+                // let item_offset = index & (BITS_PER_WORD - 1);
 
                 let item_container = items[item_index];
 
@@ -147,8 +144,8 @@ impl SmolBitVec {
                 Some(old_value)
             }
             SmolBitVecBits::Heap(items) => {
-                let item_index = index / usize::BITS as usize;
-                let item_offset = index % usize::BITS as usize;
+                let item_index = index / BITS_PER_WORD;
+                let item_offset = index % BITS_PER_WORD;
 
                 let item_container = items[item_index];
 
@@ -192,8 +189,8 @@ impl SmolBitVec {
                 value
             }
             SmolBitVecBits::Heap(items) => {
-                let item_index = last_index / usize::BITS as usize;
-                let item_offset = last_index % usize::BITS as usize;
+                let item_index = last_index / BITS_PER_WORD;
+                let item_offset = last_index % BITS_PER_WORD;
 
                 let value = items[item_index] & (1usize << item_offset) != 0;
 
@@ -229,7 +226,7 @@ impl Default for SmolBitVec {
 
 impl std::fmt::Debug for SmolBitVec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(self.into_iter()).finish()
+        f.debug_list().entries(self).finish()
     }
 }
 
@@ -322,7 +319,7 @@ mod tests {
     #[test]
     fn test_push_pop_inline() {
         let mut bv = SmolBitVec::new();
-        let limit = usize::BITS as usize;
+        let limit = BITS_PER_WORD;
 
         for i in 0..limit {
             bv.push(i % 2 == 0);
@@ -339,7 +336,7 @@ mod tests {
     #[test]
     fn test_spillover_boundary() {
         let mut bv = SmolBitVec::new();
-        let limit = usize::BITS as usize;
+        let limit = BITS_PER_WORD;
 
         // Fill exactly up to limit (inline)
         for _ in 0..limit {
@@ -369,13 +366,13 @@ mod tests {
 
         // Set bits across multiple blocks
         bv.set(0, true);
-        bv.set(usize::BITS as usize, true);
+        bv.set(BITS_PER_WORD, true);
         bv.set(large_size - 1, true);
 
         assert_eq!(bv.get(0), Some(true));
         assert_eq!(bv.get(1), Some(false));
-        assert_eq!(bv.get(usize::BITS as usize), Some(true));
-        assert_eq!(bv.get(usize::BITS as usize + 1), Some(false));
+        assert_eq!(bv.get(BITS_PER_WORD), Some(true));
+        assert_eq!(bv.get(BITS_PER_WORD + 1), Some(false));
         assert_eq!(bv.get(large_size - 1), Some(true));
         assert_eq!(bv.get(large_size), None);
     }
@@ -476,7 +473,7 @@ mod tests {
     #[test]
     fn test_inline_full_capacity() {
         let mut bv = SmolBitVec::new();
-        let cap = usize::BITS as usize;
+        let cap = BITS_PER_WORD;
 
         for i in 0..cap {
             bv.push(i % 3 == 0);
@@ -531,7 +528,7 @@ mod tests {
     #[test]
     fn test_spillover_exactly_at_boundary() {
         let mut bv = SmolBitVec::new();
-        let cap = usize::BITS as usize;
+        let cap = BITS_PER_WORD;
 
         // Fill to capacity
         for _ in 0..cap {
@@ -618,7 +615,7 @@ mod tests {
     #[test]
     fn test_pop_back_to_inline_behavior() {
         let mut bv = SmolBitVec::new();
-        let cap = usize::BITS as usize;
+        let cap = BITS_PER_WORD;
 
         for _ in 0..cap + 1 {
             bv.push(true);
@@ -649,7 +646,7 @@ mod tests {
     #[test]
     fn test_heap_compactness() {
         let mut bv = SmolBitVec::new();
-        let cap = usize::BITS as usize;
+        let cap = BITS_PER_WORD;
         let num_bits = cap + 1;
         for _ in 0..num_bits {
             bv.push(true);
@@ -675,7 +672,7 @@ mod tests {
     #[test]
     fn test_equality_consistency() {
         let mut bv_inline = SmolBitVec::new();
-        let cap = usize::BITS as usize;
+        let cap = BITS_PER_WORD;
         for _ in 0..cap {
             bv_inline.push(true);
         }
@@ -706,7 +703,7 @@ mod tests {
     #[test]
     fn test_clone_independence() {
         let mut bv1 = SmolBitVec::new();
-        let cap = usize::BITS as usize;
+        let cap = BITS_PER_WORD;
 
         // Test Inline Clone
         bv1.push(true);
@@ -729,7 +726,7 @@ mod tests {
     #[test]
     fn test_multiple_transitions() {
         let mut bv = SmolBitVec::new();
-        let cap = usize::BITS as usize;
+        let cap = BITS_PER_WORD;
 
         // Inline -> Heap
         for _ in 0..cap + 1 {
@@ -790,7 +787,7 @@ mod tests {
     #[test]
     fn test_bit_persistence_around_boundaries() {
         let mut bv = SmolBitVec::new();
-        let cap = usize::BITS as usize;
+        let cap = BITS_PER_WORD;
         let size = cap * 2;
 
         for _ in 0..size {
@@ -819,7 +816,7 @@ mod tests {
         assert_eq!(bv.get(1), None);
         assert_eq!(bv.set(1, false), None);
 
-        let cap = usize::BITS as usize;
+        let cap = BITS_PER_WORD;
         for _ in 0..cap {
             bv.push(true);
         }
@@ -857,7 +854,7 @@ mod tests {
     #[test]
     fn test_heap_cleanliness() {
         let mut bv = SmolBitVec::new();
-        let cap = usize::BITS as usize;
+        let cap = BITS_PER_WORD;
 
         // Fill first block, then add one bit to second block
         for _ in 0..cap {
@@ -970,7 +967,7 @@ mod tests {
     #[test]
     fn test_partial_eq_canonical_variants() {
         let mut bv1 = SmolBitVec::new();
-        let cap = usize::BITS as usize;
+        let cap = BITS_PER_WORD;
 
         for _ in 0..cap {
             bv1.push(true);
