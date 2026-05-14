@@ -35,7 +35,6 @@ fn is_inlineable_len(len: usize) -> bool {
 
 impl SmolBitVec {
     // TODO (1): Architectural Cleanup.
-    // - Define `const BITS: usize = usize::BITS as usize;` to replace magic numbers.
     // - Implement `clear()`, `last()`, and `reserve(additional)`.
 
     pub fn is_empty(&self) -> bool {
