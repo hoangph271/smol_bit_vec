@@ -1,18 +1,15 @@
 use std::iter::FusedIterator;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum SmolBitVecVariant {
+enum SmolBitVecBits {
     Inline(usize),
-    Heap(Vec<usize>),
+    Heap(Box<[usize]>),
 }
 
 #[derive(Clone)]
 pub struct SmolBitVec {
-    // TODO (5): Memory Layout Optimization.
-    // Currently 40 bytes on 64-bit systems. 
-    // Consider using Box<[usize]> or niche optimizations to shrink to 24-32 bytes.
     len: usize,
-    bits: SmolBitVecVariant,
+    bits: SmolBitVecBits,
 }
 
 impl PartialEq for SmolBitVec {
@@ -22,10 +19,10 @@ impl PartialEq for SmolBitVec {
         }
 
         match (&self.bits, &other.bits) {
-            (SmolBitVecVariant::Inline(a), SmolBitVecVariant::Inline(b)) => a == b,
-            (SmolBitVecVariant::Heap(a), SmolBitVecVariant::Heap(b)) => a == b,
-            (SmolBitVecVariant::Inline(_), SmolBitVecVariant::Heap(_)) => false,
-            (SmolBitVecVariant::Heap(_), SmolBitVecVariant::Inline(_)) => false,
+            (SmolBitVecBits::Inline(a), SmolBitVecBits::Inline(b)) => a == b,
+            (SmolBitVecBits::Heap(a), SmolBitVecBits::Heap(b)) => a == b,
+            (SmolBitVecBits::Inline(_), SmolBitVecBits::Heap(_)) => false,
+            (SmolBitVecBits::Heap(_), SmolBitVecBits::Inline(_)) => false,
         }
     }
 }
@@ -57,7 +54,7 @@ impl SmolBitVec {
         let next_len = len + 1;
 
         match &mut self.bits {
-            SmolBitVecVariant::Inline(bits) => {
+            SmolBitVecBits::Inline(bits) => {
                 if is_inlineable_len(next_len) {
                     if value {
                         let mask = 1usize << len;
@@ -65,18 +62,19 @@ impl SmolBitVec {
                         *bits |= mask;
                     }
                 } else {
-                    let mut bits_vec: Vec<usize> = Vec::with_capacity(2);
-                    bits_vec.push(*bits);
-
-                    bits_vec.push(value as usize);
-                    self.bits = SmolBitVecVariant::Heap(bits_vec);
+                    self.bits = SmolBitVecBits::Heap(Box::new([*bits, value as usize]));
                 }
             }
-            SmolBitVecVariant::Heap(items) => {
+            SmolBitVecBits::Heap(items) => {
                 let needs_new_item = len % usize::BITS as usize == 0;
 
                 if needs_new_item {
-                    items.push(if value { 1 } else { 0 });
+                    *items = items
+                        .iter()
+                        .copied()
+                        .chain([if value { 1usize } else { 0usize }])
+                        .collect::<Vec<usize>>()
+                        .into_boxed_slice();
                 } else {
                     if value {
                         let item_offset = len % usize::BITS as usize;
@@ -99,12 +97,12 @@ impl SmolBitVec {
         }
 
         match &self.bits {
-            SmolBitVecVariant::Inline(bits) => {
+            SmolBitVecBits::Inline(bits) => {
                 let mask = 1usize << index;
 
                 Some(bits & mask != 0)
             }
-            SmolBitVecVariant::Heap(items) => {
+            SmolBitVecBits::Heap(items) => {
                 let item_index = index / usize::BITS as usize;
                 let item_offset = index % usize::BITS as usize;
 
@@ -133,7 +131,7 @@ impl SmolBitVec {
         }
 
         match &mut self.bits {
-            SmolBitVecVariant::Inline(bits) => {
+            SmolBitVecBits::Inline(bits) => {
                 let mask = 1usize << index;
                 let old_value = *bits & mask != 0;
 
@@ -148,7 +146,7 @@ impl SmolBitVec {
 
                 Some(old_value)
             }
-            SmolBitVecVariant::Heap(items) => {
+            SmolBitVecBits::Heap(items) => {
                 let item_index = index / usize::BITS as usize;
                 let item_offset = index % usize::BITS as usize;
 
@@ -185,7 +183,7 @@ impl SmolBitVec {
         let next_len = self.len - 1;
 
         let value = match &mut self.bits {
-            SmolBitVecVariant::Inline(bits) => {
+            SmolBitVecBits::Inline(bits) => {
                 let mask = 1usize << last_index;
                 let value = *bits & (mask) != 0;
 
@@ -193,16 +191,16 @@ impl SmolBitVec {
 
                 value
             }
-            SmolBitVecVariant::Heap(items) => {
+            SmolBitVecBits::Heap(items) => {
                 let item_index = last_index / usize::BITS as usize;
                 let item_offset = last_index % usize::BITS as usize;
 
                 let value = items[item_index] & (1usize << item_offset) != 0;
 
                 if is_inlineable_len(next_len) {
-                    self.bits = SmolBitVecVariant::Inline(items[0]);
+                    self.bits = SmolBitVecBits::Inline(items[0]);
                 } else if item_offset == 0 {
-                    items.pop();
+                    *items = Box::from(&items[0..items.len() - 1]);
                 } else {
                     if let Some(block) = items.last_mut() {
                         let mask = 1usize << item_offset;
@@ -224,7 +222,7 @@ impl Default for SmolBitVec {
     fn default() -> Self {
         Self {
             len: 0,
-            bits: SmolBitVecVariant::Inline(0),
+            bits: SmolBitVecBits::Inline(0),
         }
     }
 }
@@ -311,7 +309,7 @@ mod tests {
     use super::*;
 
     // TODO (7): Property-Based Testing.
-    // Use `proptest` or `fuzzing` to verify Inline <-> Heap transitions 
+    // Use `proptest` or `fuzzing` to verify Inline <-> Heap transitions
     // and structural integrity under random operation sequences.
 
     #[test]
@@ -510,23 +508,23 @@ mod tests {
 
         // On 64-bit systems:
         // len (8 bytes)
-        // bits (24 bytes) -> SmolBitVecVariant is 24 bytes because it contains a Vec (24 bytes).
-        //                    Rust uses the Vec's pointer niche to fit the Inline(usize) variant.
-        // Total = 32 bytes (4 usizes)
+        // bits (16 bytes) -> SmolBitVecBits is 16 bytes because it contains a Box<[usize]> (16 bytes).
+        //                    Rust uses the Box's pointer niche to fit the Inline(usize) variant.
+        // Total = 24 bytes (3 usizes)
 
-        let expected_total_size = size_of::<usize>() * 4;
-        let expected_variant_size = size_of::<usize>() * 3;
+        let expected_total_size = size_of::<usize>() * 3;
+        let expected_variant_size = size_of::<usize>() * 2;
 
         assert_eq!(
             size_of::<SmolBitVec>(),
             expected_total_size,
-            "SmolBitVec size on stack should be 4 usizes (len + bits)"
+            "SmolBitVec size on stack should be 3 usizes (len + bits)"
         );
 
         assert_eq!(
-            size_of::<SmolBitVecVariant>(),
+            size_of::<SmolBitVecBits>(),
             expected_variant_size,
-            "Internal variant enum should be 3 usizes (size of Vec)"
+            "Internal variant enum should be 2 usizes (size of Box<[usize]>)"
         );
     }
 
@@ -539,12 +537,12 @@ mod tests {
         for _ in 0..cap {
             bv.push(true);
         }
-        assert!(matches!(bv.bits, SmolBitVecVariant::Inline(_)));
+        assert!(matches!(bv.bits, SmolBitVecBits::Inline(_)));
 
         // Push 65th bit (should spill)
         bv.push(false);
         assert_eq!(bv.len(), cap + 1);
-        assert!(matches!(bv.bits, SmolBitVecVariant::Heap(_)));
+        assert!(matches!(bv.bits, SmolBitVecBits::Heap(_)));
 
         // Verify all bits
         for i in 0..cap {
@@ -605,7 +603,7 @@ mod tests {
 
         let mut bv: SmolBitVec = bits.iter().copied().collect();
         assert_eq!(bv.len(), size);
-        assert!(matches!(bv.bits, SmolBitVecVariant::Heap(_)));
+        assert!(matches!(bv.bits, SmolBitVecBits::Heap(_)));
 
         let extra: Vec<bool> = (0..size).map(|i| i % 5 == 0).collect();
         bv.extend(extra.iter().copied());
@@ -625,7 +623,7 @@ mod tests {
         for _ in 0..cap + 1 {
             bv.push(true);
         }
-        assert!(matches!(bv.bits, SmolBitVecVariant::Heap(_)));
+        assert!(matches!(bv.bits, SmolBitVecBits::Heap(_)));
 
         bv.pop();
 
@@ -633,7 +631,7 @@ mod tests {
 
         // CRITICAL UPDATE: Assert that it successfully downsized back to the stack
         assert!(
-            matches!(bv.bits, SmolBitVecVariant::Inline(_)),
+            matches!(bv.bits, SmolBitVecBits::Inline(_)),
             "Should aggressively transition back to Inline variant to save memory"
         );
 
@@ -658,7 +656,7 @@ mod tests {
         }
 
         match &bv.bits {
-            SmolBitVecVariant::Heap(items) => {
+            SmolBitVecBits::Heap(items) => {
                 // For cap + 1 bits, we should only need 2 usize blocks if packed.
                 let expected_blocks = (num_bits + cap - 1) / cap;
                 assert_eq!(
@@ -721,7 +719,7 @@ mod tests {
         for _ in 0..cap {
             bv1.push(false);
         }
-        assert!(matches!(bv1.bits, SmolBitVecVariant::Heap(_)));
+        assert!(matches!(bv1.bits, SmolBitVecBits::Heap(_)));
         let mut bv3 = bv1.clone();
         bv3.set(cap, true);
         assert_eq!(bv1.get(cap), Some(false));
@@ -737,20 +735,20 @@ mod tests {
         for _ in 0..cap + 1 {
             bv.push(true);
         }
-        assert!(matches!(bv.bits, SmolBitVecVariant::Heap(_)));
+        assert!(matches!(bv.bits, SmolBitVecBits::Heap(_)));
 
         // Heap -> Inline
         for _ in 0..cap + 1 {
             bv.pop();
         }
-        assert!(matches!(bv.bits, SmolBitVecVariant::Inline(_)));
+        assert!(matches!(bv.bits, SmolBitVecBits::Inline(_)));
         assert!(bv.is_empty());
 
         // Inline -> Heap again
         for _ in 0..cap + 1 {
             bv.push(false);
         }
-        assert!(matches!(bv.bits, SmolBitVecVariant::Heap(_)));
+        assert!(matches!(bv.bits, SmolBitVecBits::Heap(_)));
     }
 
     #[test]
@@ -785,7 +783,7 @@ mod tests {
 
         assert!(bv.is_empty());
         assert_eq!(bv.len(), 0);
-        assert!(matches!(bv.bits, SmolBitVecVariant::Inline(0)));
+        assert!(matches!(bv.bits, SmolBitVecBits::Inline(0)));
         assert_eq!(bv.pop(), None);
     }
 
@@ -842,8 +840,8 @@ mod tests {
         // Manually corrupt bv2's internal state with "garbage" in high bits
         unsafe {
             let ptr = &mut bv2 as *mut SmolBitVec;
-            let variant_ptr = &mut (*ptr).bits as *mut SmolBitVecVariant;
-            if let SmolBitVecVariant::Inline(ref mut bits) = *variant_ptr {
+            let variant_ptr = &mut (*ptr).bits as *mut SmolBitVecBits;
+            if let SmolBitVecBits::Inline(ref mut bits) = *variant_ptr {
                 *bits |= 0xAAAA_AAAA_AAAA_AAAA; // Set a bunch of high bits
             }
         }
@@ -876,7 +874,7 @@ mod tests {
         // If items[0] had any bits set > cap, they would persist.
 
         assert_eq!(bv.len(), cap);
-        assert!(matches!(bv.bits, SmolBitVecVariant::Inline(_)));
+        assert!(matches!(bv.bits, SmolBitVecBits::Inline(_)));
 
         // Test Heap cleanliness without triggering Inline transition
         let mut bv_large = SmolBitVec::new();
@@ -891,7 +889,7 @@ mod tests {
 
         bv_large.pop(); // Pop bit 128. Block 2 should be removed.
 
-        if let SmolBitVecVariant::Heap(ref items) = bv_large.bits {
+        if let SmolBitVecBits::Heap(ref items) = bv_large.bits {
             assert_eq!(
                 items.len(),
                 2,
@@ -901,7 +899,7 @@ mod tests {
 
         // Now test clearing a bit WITHIN a block
         bv_large.pop(); // Pop bit 127. Bit 63 of block 1 should be zeroed.
-        if let SmolBitVecVariant::Heap(ref items) = bv_large.bits {
+        if let SmolBitVecBits::Heap(ref items) = bv_large.bits {
             let offset_in_block_1 = 63;
             assert_eq!(
                 items[1] & (1usize << offset_in_block_1),
@@ -988,8 +986,8 @@ mod tests {
         assert_eq!(bv1, bv2);
 
         // Ensure they are both actually Inline
-        assert!(matches!(bv1.bits, SmolBitVecVariant::Inline(_)));
-        assert!(matches!(bv2.bits, SmolBitVecVariant::Inline(_)));
+        assert!(matches!(bv1.bits, SmolBitVecBits::Inline(_)));
+        assert!(matches!(bv2.bits, SmolBitVecBits::Inline(_)));
     }
 
     #[test]
