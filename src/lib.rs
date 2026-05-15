@@ -19,10 +19,24 @@ impl PartialEq for SmolBitVec {
         }
 
         match (&self.bits, &other.bits) {
-            (SmolBitVecBits::Inline(a), SmolBitVecBits::Inline(b)) => a == b,
-            (SmolBitVecBits::Heap(a), SmolBitVecBits::Heap(b)) => a == b,
-            (SmolBitVecBits::Inline(_), SmolBitVecBits::Heap(_)) => false,
-            (SmolBitVecBits::Heap(_), SmolBitVecBits::Inline(_)) => false,
+            (SmolBitVecBits::Inline(a_bits), SmolBitVecBits::Inline(b_bits)) => a_bits == b_bits,
+            (SmolBitVecBits::Heap(a_bits_chunks), SmolBitVecBits::Heap(b_bits_chunks)) => {
+                let chunks_size_in_used = (self.len() + BITS_PER_WORD - 1) / BITS_PER_WORD;
+                let a_used_bits = &a_bits_chunks[..chunks_size_in_used];
+                let b_used_bits = &b_bits_chunks[..chunks_size_in_used];
+
+                a_used_bits == b_used_bits
+            }
+            (SmolBitVecBits::Inline(a), SmolBitVecBits::Heap(b)) => {
+                let a_bits = *a;
+                let b_bits = b[0];
+                a_bits == b_bits
+            }
+            (SmolBitVecBits::Heap(a), SmolBitVecBits::Inline(b)) => {
+                let a_bits = a[0];
+                let b_bits = *b;
+                a_bits == b_bits
+            }
         }
     }
 }
@@ -62,7 +76,8 @@ impl SmolBitVec {
                 }
             }
             SmolBitVecBits::Heap(items) => {
-                let needs_new_item = len.is_multiple_of(BITS_PER_WORD);
+                let reserved_len = items.len() * BITS_PER_WORD;
+                let needs_new_item = next_len > reserved_len;
 
                 if needs_new_item {
                     *items = items
@@ -74,9 +89,10 @@ impl SmolBitVec {
                 } else {
                     if value {
                         let item_offset = len % BITS_PER_WORD;
+                        let item_index = len / BITS_PER_WORD;
                         let mask = 1usize << item_offset;
 
-                        if let Some(last) = items.last_mut() {
+                        if let Some(last) = items.get_mut(item_index) {
                             *last |= mask;
                         }
                     }
@@ -248,6 +264,33 @@ impl SmolBitVec {
         };
 
         Some((bits_block >> 0 % BITS_PER_WORD) & 1 != 0)
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        let next_len = self.len + additional;
+
+        match &mut self.bits {
+            SmolBitVecBits::Inline(inline_bits) => {
+                if is_inlineable_len(next_len) {
+                    return;
+                }
+
+                let next_bits_array_len = (next_len + BITS_PER_WORD - 1) / BITS_PER_WORD;
+                let mut bits_vec = Vec::with_capacity(next_bits_array_len);
+
+                bits_vec.push(*inline_bits);
+                bits_vec.resize(next_bits_array_len, 0);
+
+                self.bits = SmolBitVecBits::Heap(bits_vec.into_boxed_slice());
+            }
+            SmolBitVecBits::Heap(items) => {
+                let next_bits_array_len = (next_len + BITS_PER_WORD - 1) / BITS_PER_WORD;
+
+                let mut bits_vec = Vec::from(items.clone());
+                bits_vec.resize(next_bits_array_len, 0);
+                *items = bits_vec.into_boxed_slice();
+            }
+        }
     }
 }
 
@@ -1109,5 +1152,62 @@ mod tests {
 
         bv2.set(0, false);
         assert_eq!(bv2.first(), Some(false));
+    }
+
+    #[test]
+    fn test_reserve_basic() {
+        let mut bv = SmolBitVec::new();
+        // Reserving on an empty vector
+        bv.reserve(100);
+
+        for i in 0..100 {
+            bv.push(i % 3 == 0);
+        }
+
+        assert_eq!(bv.len(), 100);
+        for i in 0..100 {
+            assert_eq!(bv.get(i), Some(i % 3 == 0));
+        }
+    }
+
+    #[test]
+    fn test_reserve_inline_to_heap() {
+        let mut bv = SmolBitVec::new();
+        bv.push(true);
+        // This should force a transition to heap if additional > capacity
+        bv.reserve(BITS_PER_WORD + 1);
+
+        assert_eq!(bv.len(), 1);
+        assert_eq!(bv.get(0), Some(true));
+
+        // Ensure further pushes work
+        for _ in 0..BITS_PER_WORD {
+            bv.push(false);
+        }
+        assert_eq!(bv.len(), BITS_PER_WORD + 1);
+        assert_eq!(bv.get(0), Some(true));
+        assert_eq!(bv.get(BITS_PER_WORD), Some(false));
+    }
+
+    #[test]
+    fn test_reserve_equality_with_different_capacities() {
+        let mut bv1 = SmolBitVec::new();
+        let mut bv2 = SmolBitVec::new();
+
+        for i in 0..BITS_PER_WORD {
+            let b = i % 2 == 0;
+            bv1.push(b);
+            bv2.push(b);
+        }
+
+        // bv2 might transition or reallocate, but logically they are the same
+        bv2.reserve(1000);
+
+        assert_eq!(bv1, bv2, "Equality should ignore capacity differences");
+
+        // Even after more pushes
+        bv1.push(true);
+        bv2.push(true);
+        assert_eq!(bv1, bv2);
     }
 }
