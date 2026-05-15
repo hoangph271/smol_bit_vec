@@ -41,6 +41,8 @@ impl PartialEq for SmolBitVec {
     }
 }
 
+impl Eq for SmolBitVec {}
+
 const BITS_PER_WORD: usize = usize::BITS as usize;
 
 fn is_inlineable_len(len: usize) -> bool {
@@ -48,9 +50,6 @@ fn is_inlineable_len(len: usize) -> bool {
 }
 
 impl SmolBitVec {
-    // TODO (1): Architectural Cleanup.
-    // - Implement `reserve(additional)`.
-
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -263,7 +262,7 @@ impl SmolBitVec {
             SmolBitVecBits::Heap(bits) => &bits[0],
         };
 
-        Some((bits_block >> 0 % BITS_PER_WORD) & 1 != 0)
+        Some(bits_block & 1 != 0)
     }
 
     pub fn reserve(&mut self, additional: usize) {
@@ -285,6 +284,10 @@ impl SmolBitVec {
             }
             SmolBitVecBits::Heap(items) => {
                 let next_bits_array_len = (next_len + BITS_PER_WORD - 1) / BITS_PER_WORD;
+
+                if items.len() >= next_bits_array_len {
+                    return;
+                }
 
                 let mut bits_vec = Vec::from(items.clone());
                 bits_vec.resize(next_bits_array_len, 0);
@@ -1209,5 +1212,90 @@ mod tests {
         bv1.push(true);
         bv2.push(true);
         assert_eq!(bv1, bv2);
+    }
+
+    // Bug #1a: pop with item_offset==0 removes the wrong block when the heap is
+    // over-allocated. The last over-allocated (empty) block is dropped instead of
+    // block item_index, leaving a dirty bit that poisons the next get at that position.
+    #[test]
+    fn test_pop_after_reserve_block_boundary_dirty_bit() {
+        let mut bv = SmolBitVec::new();
+        let cap = BITS_PER_WORD;
+
+        for _ in 0..cap * 2 + 1 {
+            bv.push(true);
+        }
+        bv.reserve(cap * 4); // items.len() is now larger than item_index (2) + 1
+
+        // last_index=cap*2, item_index=2, item_offset=0
+        assert_eq!(bv.pop(), Some(true));
+        assert_eq!(bv.len(), cap * 2);
+
+        bv.push(false);
+        assert_eq!(
+            bv.get(cap * 2),
+            Some(false),
+            "dirty bit in items[2] caused get to return true after pushing false"
+        );
+    }
+
+    // Bug #1b: pop with item_offset!=0 clears the bit in the wrong block when the
+    // heap is over-allocated. items.last_mut() is used instead of items[item_index],
+    // so the dirty bit persists and poisons the next get at that position.
+    #[test]
+    fn test_pop_after_reserve_mid_block_dirty_bit() {
+        let mut bv = SmolBitVec::new();
+        let cap = BITS_PER_WORD;
+
+        for _ in 0..cap + 6 {
+            bv.push(true);
+        }
+        bv.reserve(cap * 4); // items.len() is now larger than item_index (1) + 1
+
+        // last_index=cap+5, item_index=1, item_offset=5
+        assert_eq!(bv.pop(), Some(true));
+        assert_eq!(bv.len(), cap + 5);
+
+        bv.push(false);
+        assert_eq!(
+            bv.get(cap + 5),
+            Some(false),
+            "dirty bit in items[1] caused get to return true after pushing false"
+        );
+    }
+
+    #[test]
+    fn test_reserve_does_not_shrink_capacity() {
+        let mut bv = SmolBitVec::new();
+        let cap = BITS_PER_WORD;
+
+        for _ in 0..cap + 1 {
+            bv.push(true);
+        }
+
+        bv.reserve(cap * 10);
+        let blocks_after_large_reserve = match &bv.bits {
+            SmolBitVecBits::Heap(items) => items.len(),
+            _ => panic!("expected Heap"),
+        };
+
+        bv.reserve(1);
+        let blocks_after_small_reserve = match &bv.bits {
+            SmolBitVecBits::Heap(items) => items.len(),
+            _ => panic!("expected Heap"),
+        };
+
+        assert_eq!(
+            blocks_after_small_reserve, blocks_after_large_reserve,
+            "reserve(1) shrank capacity from {} to {} blocks",
+            blocks_after_large_reserve, blocks_after_small_reserve
+        );
+    }
+
+    #[test]
+    fn test_eq_trait_bound() {
+        fn requires_eq<T: Eq>(_: &T) {}
+        let bv = SmolBitVec::new();
+        requires_eq(&bv);
     }
 }
