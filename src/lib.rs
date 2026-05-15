@@ -35,7 +35,7 @@ fn is_inlineable_len(len: usize) -> bool {
 
 impl SmolBitVec {
     // TODO (1): Architectural Cleanup.
-    // - Implement `clear()`, `last()`, and `reserve(additional)`.
+    // - Implement `reserve(additional)`.
 
     pub fn is_empty(&self) -> bool {
         self.len == 0
@@ -211,6 +211,43 @@ impl SmolBitVec {
         self.len -= 1;
 
         Some(value)
+    }
+
+    pub fn clear(&mut self) {
+        self.len = 0;
+        self.bits = SmolBitVecBits::Inline(0);
+    }
+
+    pub fn last(&self) -> Option<bool> {
+        if self.len == 0 {
+            return None;
+        }
+
+        let index = self.len - 1;
+
+        match &self.bits {
+            SmolBitVecBits::Inline(inline) => {
+                let value = (inline >> (index % BITS_PER_WORD)) & 1 != 0;
+                Some(value)
+            }
+            SmolBitVecBits::Heap(heap) => {
+                let value = (heap[index / BITS_PER_WORD] >> (index % BITS_PER_WORD)) & 1 != 0;
+                Some(value)
+            }
+        }
+    }
+
+    pub fn first(&self) -> Option<bool> {
+        if self.len == 0 {
+            return None;
+        }
+
+        let bits_block = match &self.bits {
+            SmolBitVecBits::Inline(inline) => inline,
+            SmolBitVecBits::Heap(bits) => &bits[0],
+        };
+
+        Some((bits_block >> 0 % BITS_PER_WORD) & 1 != 0)
     }
 }
 
@@ -1021,5 +1058,56 @@ mod tests {
         bv5.extend(std::iter::empty::<bool>());
         assert!(bv5.is_empty());
         assert_eq!(bv1, bv5);
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut bv = SmolBitVec::new();
+        bv.push(true);
+        bv.push(false);
+        bv.push(true);
+        assert_eq!(bv.len(), 3);
+        bv.clear();
+        assert_eq!(bv.len(), 0);
+        assert!(bv.is_empty());
+        assert_eq!(bv.get(0), None);
+
+        // Test clear on heap
+        for _ in 0..BITS_PER_WORD + 1 {
+            bv.push(true);
+        }
+        assert!(matches!(bv.bits, SmolBitVecBits::Heap(_)));
+        bv.clear();
+        assert_eq!(bv.len(), 0);
+        assert!(matches!(bv.bits, SmolBitVecBits::Inline(0)));
+    }
+
+    #[test]
+    fn test_first_last() {
+        let mut bv = SmolBitVec::new();
+        assert_eq!(bv.first(), None);
+        assert_eq!(bv.last(), None);
+
+        bv.push(true);
+        assert_eq!(bv.first(), Some(true));
+        assert_eq!(bv.last(), Some(true));
+
+        bv.push(false);
+        assert_eq!(bv.first(), Some(true));
+        assert_eq!(bv.last(), Some(false));
+
+        // Test heap
+        let mut bv2 = SmolBitVec::new();
+        for i in 0..BITS_PER_WORD + 1 {
+            bv2.push(i == 0); // first is true, others false
+        }
+        assert_eq!(bv2.first(), Some(true));
+        assert_eq!(bv2.last(), Some(false));
+
+        bv2.set(BITS_PER_WORD, true);
+        assert_eq!(bv2.last(), Some(true));
+
+        bv2.set(0, false);
+        assert_eq!(bv2.first(), Some(false));
     }
 }
