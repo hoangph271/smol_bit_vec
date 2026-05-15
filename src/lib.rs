@@ -210,12 +210,16 @@ impl SmolBitVec {
 
                 if is_inlineable_len(next_len) {
                     self.bits = SmolBitVecBits::Inline(items[0]);
-                } else if item_offset == 0 {
-                    *items = Box::from(&items[0..items.len() - 1]);
                 } else {
-                    if let Some(block) = items.last_mut() {
-                        let mask = 1usize << item_offset;
-                        *block &= !mask;
+                    let bits_chunk_size = items.len();
+
+                    if item_offset == 0 && item_index == bits_chunk_size - 1 {
+                        *items = Box::from(&items[0..items.len() - 1]);
+                    } else {
+                        if let Some(block) = items.get_mut(item_index) {
+                            let mask = 1usize << item_offset;
+                            *block &= !mask;
+                        }
                     }
                 }
 
