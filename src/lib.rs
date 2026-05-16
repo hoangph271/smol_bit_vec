@@ -1,4 +1,4 @@
-use std::iter::FusedIterator;
+use std::{iter::FusedIterator, mem::replace};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SmolBitVecBits {
@@ -19,23 +19,61 @@ impl PartialEq for SmolBitVec {
         }
 
         match (&self.bits, &other.bits) {
-            (SmolBitVecBits::Inline(a_bits), SmolBitVecBits::Inline(b_bits)) => a_bits == b_bits,
-            (SmolBitVecBits::Heap(a_bits_chunks), SmolBitVecBits::Heap(b_bits_chunks)) => {
-                let chunks_size_in_used = (self.len() + BITS_PER_WORD - 1) / BITS_PER_WORD;
-                let a_used_bits = &a_bits_chunks[..chunks_size_in_used];
-                let b_used_bits = &b_bits_chunks[..chunks_size_in_used];
+            (SmolBitVecBits::Inline(a_bits), SmolBitVecBits::Inline(b_bits)) => {
+                let mask = if self.len() == usize::BITS as usize {
+                    usize::MAX
+                } else {
+                    (1usize << self.len()) - 1
+                };
 
-                a_used_bits == b_used_bits
+                a_bits & mask == b_bits & mask
+            }
+            (SmolBitVecBits::Heap(a_bits_chunks), SmolBitVecBits::Heap(b_bits_chunks)) => {
+                let chunks_size_in_used = self.len().div_ceil(BITS_PER_WORD);
+                let a_used_bits = &a_bits_chunks[..chunks_size_in_used];
+                let b_used_bits_chunks = &b_bits_chunks[..chunks_size_in_used];
+
+                let full_chunks = self.len() / BITS_PER_WORD;
+
+                if a_used_bits[..full_chunks] != b_used_bits_chunks[..full_chunks] {
+                    return false;
+                }
+
+                let remainder = self.len() % BITS_PER_WORD;
+
+                if remainder > 0 {
+                    let mask = (1usize << remainder) - 1;
+
+                    if a_used_bits[full_chunks] & mask != b_used_bits_chunks[full_chunks] & mask {
+                        return false;
+                    }
+                }
+
+                true
             }
             (SmolBitVecBits::Inline(a), SmolBitVecBits::Heap(b)) => {
+                let mask = if self.len() == usize::BITS as usize {
+                    usize::MAX
+                } else {
+                    (1usize << self.len()) - 1
+                };
+
                 let a_bits = *a;
                 let b_bits = b[0];
-                a_bits == b_bits
+
+                a_bits & mask == b_bits & mask
             }
             (SmolBitVecBits::Heap(a), SmolBitVecBits::Inline(b)) => {
+                let mask = if self.len() == usize::BITS as usize {
+                    usize::MAX
+                } else {
+                    (1usize << self.len()) - 1
+                };
+
                 let a_bits = a[0];
                 let b_bits = *b;
-                a_bits == b_bits
+
+                a_bits & mask == b_bits & mask
             }
         }
     }
@@ -71,30 +109,28 @@ impl SmolBitVec {
                         *bits |= mask;
                     }
                 } else {
+                    // At spillover, len == BITS_PER_WORD, so the new bit (value)
+                    // is always at offset 0 of the second block.
                     self.bits = SmolBitVecBits::Heap(Box::new([*bits, value as usize]));
                 }
             }
-            SmolBitVecBits::Heap(items) => {
-                let reserved_len = items.len() * BITS_PER_WORD;
-                let needs_new_item = next_len > reserved_len;
+            SmolBitVecBits::Heap(bits_chunks) => {
+                let reserved_len = bits_chunks.len() * BITS_PER_WORD;
+                let needs_new_chunk = next_len > reserved_len;
 
-                if needs_new_item {
-                    *items = items
+                if needs_new_chunk {
+                    *bits_chunks = bits_chunks
                         .iter()
                         .copied()
                         .chain([if value { 1usize } else { 0usize }])
                         .collect::<Vec<usize>>()
                         .into_boxed_slice();
-                } else {
-                    if value {
-                        let item_offset = len % BITS_PER_WORD;
-                        let item_index = len / BITS_PER_WORD;
-                        let mask = 1usize << item_offset;
+                } else if value {
+                    let chunk_offset = len % BITS_PER_WORD;
+                    let chunk_index = len / BITS_PER_WORD;
+                    let mask = 1usize << chunk_offset;
 
-                        if let Some(last) = items.get_mut(item_index) {
-                            *last |= mask;
-                        }
-                    }
+                    bits_chunks[chunk_index] |= mask;
                 }
             }
         }
@@ -185,6 +221,13 @@ impl SmolBitVec {
         self.len
     }
 
+    pub fn capacity(&self) -> usize {
+        match &self.bits {
+            SmolBitVecBits::Inline(_) => BITS_PER_WORD,
+            SmolBitVecBits::Heap(items) => items.len() * BITS_PER_WORD,
+        }
+    }
+
     pub fn pop(&mut self) -> Option<bool> {
         if self.is_empty() {
             return None;
@@ -209,6 +252,10 @@ impl SmolBitVec {
                 let value = items[item_index] & (1usize << item_offset) != 0;
 
                 if is_inlineable_len(next_len) {
+                    // Transition back to Inline. We use items[0] directly without
+                    // clearing the popped bit because when transitioning from Heap
+                    // (where len was BITS_PER_WORD + 1), the popped bit was
+                    // at index 0 of items[1] or beyond.
                     self.bits = SmolBitVecBits::Inline(items[0]);
                 } else {
                     let bits_chunk_size = items.len();
@@ -269,8 +316,18 @@ impl SmolBitVec {
         Some(bits_block & 1 != 0)
     }
 
+    /// Reserves capacity for at least `additional` more bits.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.len() + additional` overflows `usize`.
     pub fn reserve(&mut self, additional: usize) {
-        let next_len = self.len + additional;
+        let next_len = self.len.checked_add(additional).unwrap_or_else(|| {
+            panic!(
+                "Capacity overflow, the len is already {} and tried to add {}",
+                self.len, additional
+            )
+        });
 
         match &mut self.bits {
             SmolBitVecBits::Inline(inline_bits) => {
@@ -278,7 +335,7 @@ impl SmolBitVec {
                     return;
                 }
 
-                let next_bits_array_len = (next_len + BITS_PER_WORD - 1) / BITS_PER_WORD;
+                let next_bits_array_len = next_len.div_ceil(BITS_PER_WORD);
                 let mut bits_vec = Vec::with_capacity(next_bits_array_len);
 
                 bits_vec.push(*inline_bits);
@@ -287,7 +344,7 @@ impl SmolBitVec {
                 self.bits = SmolBitVecBits::Heap(bits_vec.into_boxed_slice());
             }
             SmolBitVecBits::Heap(items) => {
-                let next_bits_array_len = (next_len + BITS_PER_WORD - 1) / BITS_PER_WORD;
+                let next_bits_array_len = next_len.div_ceil(BITS_PER_WORD);
 
                 if items.len() >= next_bits_array_len {
                     return;
@@ -318,13 +375,42 @@ impl std::fmt::Debug for SmolBitVec {
 
 impl FromIterator<bool> for SmolBitVec {
     fn from_iter<T: IntoIterator<Item = bool>>(iter: T) -> Self {
+        let iter = iter.into_iter();
+
+        let (lower_bound, _) = iter.size_hint();
+        let expected_bits_chunks = lower_bound.div_ceil(BITS_PER_WORD);
+        let mut bits_chunks = Vec::with_capacity(expected_bits_chunks);
+
+        let mut current_bits_chunk = 0usize;
+        let mut bit_offset = 0;
+        let mut total_len = 0;
+
+        for bit in iter {
+            if bit_offset == BITS_PER_WORD {
+                bits_chunks.push(current_bits_chunk);
+                current_bits_chunk = 0;
+                bit_offset = 0;
+            }
+
+            if bit {
+                current_bits_chunk |= 1 << bit_offset;
+            }
+
+            bit_offset += 1;
+            total_len += 1;
+        }
+
         let mut smol_bit_vec = Self::new();
 
-        // TODO: This is inefficient
-        // We should remove the loop entirely
-        // Only here to fulfill the trait requirement
-        for value in iter.into_iter() {
-            smol_bit_vec.push(value);
+        if total_len <= BITS_PER_WORD {
+            smol_bit_vec.bits = SmolBitVecBits::Inline(current_bits_chunk);
+            smol_bit_vec.len = total_len;
+        } else {
+            if bit_offset != 0 {
+                bits_chunks.push(current_bits_chunk);
+            }
+            smol_bit_vec.bits = SmolBitVecBits::Heap(bits_chunks.into_boxed_slice());
+            smol_bit_vec.len = total_len;
         }
 
         smol_bit_vec
@@ -378,11 +464,46 @@ impl<'a> IntoIterator for &'a SmolBitVec {
 
 impl Extend<bool> for SmolBitVec {
     fn extend<T: IntoIterator<Item = bool>>(&mut self, iter: T) {
-        // TODO: Optimize by checking size_hint() and performing bulk transitions.
-        // If we know we are adding many bits, transition to Heap once and
-        // fill entire usize blocks at a time.
-        for item in iter {
-            self.push(item);
+        let mut iter = iter.into_iter();
+
+        if let SmolBitVecBits::Inline(ref mut bits) = self.bits {
+            for item in iter.by_ref() {
+                if self.len == BITS_PER_WORD {
+                    self.bits = SmolBitVecBits::Heap(Box::new([*bits, if item { 1 } else { 0 }]));
+
+                    self.len += 1;
+
+                    break;
+                } else {
+                    let bit_offset = self.len % BITS_PER_WORD;
+
+                    if item {
+                        *bits |= 1usize << bit_offset;
+                    };
+
+                    self.len += 1;
+                }
+            }
+        }
+
+        if let SmolBitVecBits::Heap(ref mut bits_chunk) = self.bits {
+            let mut bits_chunks_vec = Vec::from(replace(bits_chunk, Box::new([])));
+
+            for item in iter {
+                let len = self.len;
+                let chunk_index = len / BITS_PER_WORD;
+                let bit_offset = len % BITS_PER_WORD;
+
+                if bit_offset == 0 && chunk_index == bits_chunks_vec.len() {
+                    bits_chunks_vec.push(if item { 1 } else { 0 });
+                } else if item {
+                    bits_chunks_vec[chunk_index] |= 1usize << bit_offset;
+                }
+
+                self.len += 1;
+            }
+
+            *bits_chunk = bits_chunks_vec.into_boxed_slice();
         }
     }
 }
@@ -929,11 +1050,9 @@ mod tests {
             }
         }
 
-        // Currently, our Inline PartialEq is `a == b`, so this SHOULD FAIL if bits are dirty.
-        // This confirms that our current implementation RELIES on bit cleanliness.
-        assert_ne!(
+        assert_eq!(
             bv1, bv2,
-            "Equality should fail because high bits are dirty and we don't mask in PartialEq"
+            "PartialEq should mask dirty high bits and treat vectors as equal"
         );
     }
 
@@ -1301,5 +1420,131 @@ mod tests {
         fn requires_eq<T: Eq>(_: &T) {}
         let bv = SmolBitVec::new();
         requires_eq(&bv);
+    }
+
+    #[test]
+    fn test_extend_after_reserve_does_not_corrupt() {
+        let mut bv = SmolBitVec::new();
+        bv.reserve(BITS_PER_WORD * 4); // over-allocate: 4 zeroed blocks
+
+        let bits: Vec<bool> = (0..BITS_PER_WORD * 2 + 5).map(|i| i % 3 == 0).collect();
+        bv.extend(bits.iter().copied());
+
+        assert_eq!(bv.len(), bits.len());
+        for (i, &b) in bits.iter().enumerate() {
+            assert_eq!(
+                bv.get(i),
+                Some(b),
+                "bit {i} corrupted: extend on over-allocated heap wrote to the wrong block"
+            );
+        }
+    }
+
+    // Requesting capacity that overflows usize is a programmer error and must panic.
+    #[test]
+    #[should_panic]
+    fn test_reserve_panics_on_overflow() {
+        let mut bv = SmolBitVec::new();
+        bv.push(true);
+        bv.reserve(usize::MAX); // len(1) + usize::MAX overflows
+    }
+
+    #[test]
+    fn test_eq_masks_inline_vs_inline_dirty_bits() {
+        let mut bv1 = SmolBitVec::new();
+        bv1.push(true); // len=1, only bit 0 is meaningful
+
+        let mut bv2 = bv1.clone();
+        unsafe {
+            let ptr = &mut bv2 as *mut SmolBitVec;
+            if let SmolBitVecBits::Inline(ref mut bits) = (*ptr).bits {
+                *bits |= !1usize; // dirty all high bits
+            }
+        }
+
+        assert_eq!(
+            bv1, bv2,
+            "Inline vs Inline: dirty high bits should be ignored"
+        );
+    }
+
+    #[test]
+    fn test_eq_masks_heap_vs_heap_dirty_last_block() {
+        // Push BITS_PER_WORD + 1 bits so we have 2 blocks; the second block has 1 used bit.
+        // Dirty a high bit in the second block (beyond logical length) — currently leaks through.
+        let bv1: SmolBitVec = (0..BITS_PER_WORD + 1).map(|i| i % 2 == 0).collect();
+        let mut bv2 = bv1.clone();
+
+        unsafe {
+            let ptr = &mut bv2 as *mut SmolBitVec;
+            if let SmolBitVecBits::Heap(ref mut items) = (*ptr).bits {
+                items[1] |= 0xFFFF_FFFF_FFFF_FFFE; // dirty bits 1..63 of last block
+            }
+        }
+
+        assert_eq!(
+            bv1, bv2,
+            "Heap vs Heap: dirty bits in last partial block should be ignored"
+        );
+    }
+
+    #[test]
+    fn test_eq_masks_inline_vs_heap_dirty_bits() {
+        // Use reserve to force one vec into Heap while keeping len <= BITS_PER_WORD.
+        let mut bv_inline = SmolBitVec::new();
+        bv_inline.push(true);
+        bv_inline.push(false);
+
+        let mut bv_heap = bv_inline.clone();
+        bv_heap.reserve(BITS_PER_WORD * 3); // now Heap with len=2
+
+        unsafe {
+            let ptr = &mut bv_heap as *mut SmolBitVec;
+            if let SmolBitVecBits::Heap(ref mut items) = (*ptr).bits {
+                items[0] |= 0xFFFF_FFFF_FFFF_FFFC; // dirty bits 2..63
+            }
+        }
+
+        assert_eq!(
+            bv_inline, bv_heap,
+            "Inline vs Heap: dirty high bits in heap block[0] should be ignored"
+        );
+        assert_eq!(
+            bv_heap, bv_inline,
+            "Heap vs Inline: dirty high bits in heap block[0] should be ignored"
+        );
+    }
+
+    #[test]
+    fn test_capacity() {
+        // Inline: capacity is always BITS_PER_WORD regardless of len
+        let mut bv = SmolBitVec::new();
+        assert_eq!(bv.capacity(), BITS_PER_WORD);
+
+        bv.push(true);
+        assert_eq!(bv.capacity(), BITS_PER_WORD);
+
+        // Filling inline to the brim does not change capacity
+        for _ in 1..BITS_PER_WORD {
+            bv.push(false);
+        }
+        assert_eq!(bv.len(), BITS_PER_WORD);
+        assert_eq!(bv.capacity(), BITS_PER_WORD);
+
+        // Spillover to Heap: capacity grows to the next block boundary
+        bv.push(true);
+        assert!(matches!(bv.bits, SmolBitVecBits::Heap(_)));
+        assert_eq!(bv.capacity(), BITS_PER_WORD * 2);
+
+        // reserve increases capacity without changing len
+        let mut bv2 = SmolBitVec::new();
+        bv2.push(true);
+        bv2.reserve(BITS_PER_WORD * 3);
+        assert_eq!(bv2.len(), 1);
+        assert!(bv2.capacity() >= BITS_PER_WORD * 3 + 1);
+
+        // capacity never drops below len
+        bv2.reserve(1);
+        assert!(bv2.capacity() >= bv2.len());
     }
 }
