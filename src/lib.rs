@@ -6,6 +6,19 @@ enum SmolBitVecBits {
     Heap(Box<[usize]>),
 }
 
+impl SmolBitVecBits {
+    /// Returns a slice view of the underlying words.
+    ///
+    /// Note: The returned slice may contain "dirty bits" (data beyond the logical length
+    /// of the bit vector) and unused trailing words if the capacity exceeds the length.
+    fn as_slice(&self) -> &[usize] {
+        match self {
+            SmolBitVecBits::Inline(bits) => std::slice::from_ref(bits),
+            SmolBitVecBits::Heap(chunks) => chunks,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SmolBitVec {
     len: usize,
@@ -18,64 +31,25 @@ impl PartialEq for SmolBitVec {
             return false;
         }
 
-        match (&self.bits, &other.bits) {
-            (SmolBitVecBits::Inline(a_bits), SmolBitVecBits::Inline(b_bits)) => {
-                let mask = if self.len() == usize::BITS as usize {
-                    usize::MAX
-                } else {
-                    (1usize << self.len()) - 1
-                };
+        let a_used_bits = self.bits.as_slice();
+        let b_used_bits = other.bits.as_slice();
 
-                a_bits & mask == b_bits & mask
-            }
-            (SmolBitVecBits::Heap(a_bits_chunks), SmolBitVecBits::Heap(b_bits_chunks)) => {
-                let chunks_size_in_used = self.len().div_ceil(BITS_PER_WORD);
-                let a_used_bits = &a_bits_chunks[..chunks_size_in_used];
-                let b_used_bits_chunks = &b_bits_chunks[..chunks_size_in_used];
+        let full_chunks = self.len() / BITS_PER_WORD;
 
-                let full_chunks = self.len() / BITS_PER_WORD;
+        if a_used_bits[..full_chunks] != b_used_bits[..full_chunks] {
+            return false;
+        }
 
-                if a_used_bits[..full_chunks] != b_used_bits_chunks[..full_chunks] {
-                    return false;
-                }
+        let remainder = self.len() % BITS_PER_WORD;
+        if remainder > 0 {
+            let mask = (1usize << remainder) - 1;
 
-                let remainder = self.len() % BITS_PER_WORD;
-
-                if remainder > 0 {
-                    let mask = (1usize << remainder) - 1;
-
-                    if a_used_bits[full_chunks] & mask != b_used_bits_chunks[full_chunks] & mask {
-                        return false;
-                    }
-                }
-
-                true
-            }
-            (SmolBitVecBits::Inline(a), SmolBitVecBits::Heap(b)) => {
-                let mask = if self.len() == usize::BITS as usize {
-                    usize::MAX
-                } else {
-                    (1usize << self.len()) - 1
-                };
-
-                let a_bits = *a;
-                let b_bits = b[0];
-
-                a_bits & mask == b_bits & mask
-            }
-            (SmolBitVecBits::Heap(a), SmolBitVecBits::Inline(b)) => {
-                let mask = if self.len() == usize::BITS as usize {
-                    usize::MAX
-                } else {
-                    (1usize << self.len()) - 1
-                };
-
-                let a_bits = a[0];
-                let b_bits = *b;
-
-                a_bits & mask == b_bits & mask
+            if a_used_bits[full_chunks] & mask != b_used_bits[full_chunks] & mask {
+                return false;
             }
         }
+
+        true
     }
 }
 
@@ -1546,5 +1520,37 @@ mod tests {
         // capacity never drops below len
         bv2.reserve(1);
         assert!(bv2.capacity() >= bv2.len());
+    }
+
+    #[test]
+    fn test_bit_isolation_and_equality() {
+        let mut bv1 = SmolBitVec::new();
+        bv1.push(true); // len = 1, bits = ...0001
+
+        let mut bv2 = bv1.clone();
+
+        // Manually corrupt bv2 with "dirty" bits beyond the logical length.
+        unsafe {
+            let ptr = &mut bv2 as *mut SmolBitVec;
+            match &mut (*ptr).bits {
+                SmolBitVecBits::Inline(bits) => *bits |= 0b1111_1110,
+                _ => unreachable!(),
+            }
+        }
+
+        // This should pass if PartialEq uses proper masking
+        assert_eq!(
+            bv1, bv2,
+            "PartialEq must ignore bits beyond the logical length"
+        );
+    }
+
+    #[test]
+    fn test_consuming_iterator() {
+        let bits = vec![true, false, true];
+        let bv: SmolBitVec = bits.iter().copied().collect();
+
+        let collected: Vec<bool> = bv.into_iter().collect();
+        assert_eq!(collected, bits);
     }
 }
